@@ -1,0 +1,84 @@
+# config_human_MGI.yaml
+# ---------------------------------------------------------------------------
+# Human (hg38) single-cell nano-CUT&Tag, MGI platform (R1 + R2 only, no R3).
+# Epigenomic fraction only (no RNA fraction for this run).
+#
+# Run with:
+#   snakemake -s workflow/Snakefile_preprocess.smk --configfile config/config_human_MGI.yaml --cores N --use-conda
+#
+# MGI read layout that debarcode.py expects on R2 (platform: mgi):
+#   [0:8] modality barcode | [8:88] genomic insert | [88:96] adaptor | [96:112] cell barcode
+#
+# Raw data lives under /date/gcb/gcb_YD/raw_data/260714_XG_rawdata/ split across
+# two flowcells (V350421076, V350421687) and lanes, named by i7 index well
+# (e.g. SI-NA-B7_L01_R1.fastq.gz). The MGI demultiplex rule needs EXACTLY ONE
+# R1 and ONE R2 per sample, so point each `fastq_path` at a folder that holds
+# only THAT sample's concatenated R1/R2 (merge lanes + both flowcells first;
+# a `concatenate/` folder alongside the raw data is already being built).
+#
+# Library ID ->  i7 index well  (sample-level demux, already done by MGI)
+#   PBMC_CT       SI-NA-B7
+#   PBMC_DynaTag  SI-NA-B8      # DynaTag, not CUT&Tag -- confirm before processing
+#   MS3BL1_CT     SI-NA-B9
+#   MS3BL2_CT     SI-NA-B10
+#   MS549_CT      SI-NA-B5
+#
+# TODO (fill in manually):
+#   - fastq_path: point at the per-sample concatenated R1/R2 folder
+#   - barcodes:   set the antibody/modality barcodes present in each library
+# ---------------------------------------------------------------------------
+
+samples:
+ MS3BL1_CT:                                     # pool: MS381 (CT1+CT2), MS058 (CT1+CT2), MS549
+    fastq_path: /date/gcb/gcb_wq/nanoCTAR/raw_data/MS3BL1_CT/
+    platform: mgi
+    barcodes:
+      H3K27ac_MS381CT1:  CCTATCCT
+      H3K27me3_MS381CT1: ATAGAGGC
+      H3K27ac_MS381CT2:  TCGAGCTA
+      H3K27me3_MS381CT2: GCTTCGAA
+      H3K27ac_MS058CT1:  AGCTTGAC
+      H3K27me3_MS058CT1: TACGTCGA
+      H3K27ac_MS058CT2:  CATGTCAG
+      H3K27me3_MS058CT2: CGTACGAT
+      H3K27ac_MS549CT:   GTACAGCT
+      H3K27me3_MS549CT:  GATCGTAC
+
+  MS3BL2_CT:                                     # pool: MS381 (CT1+CT2), MS058 (CT1+CT2), MS549
+    fastq_path: /date/gcb/gcb_wq/nanoCTAR/raw_data/MS3BL2_CT/
+    platform: mgi
+    barcodes:
+      H3K27ac_MS381CT1:  CCTATCCT
+      H3K27me3_MS381CT1: ATAGAGGC
+      H3K27ac_MS381CT2:  TCGAGCTA
+      H3K27me3_MS381CT2: GCTTCGAA
+      H3K27ac_MS058CT1:  AGCTTGAC
+      H3K27me3_MS058CT1: TACGTCGA
+      H3K27ac_MS058CT2:  CATGTCAG
+      H3K27me3_MS058CT2: CGTACGAT
+      H3K27ac_MS549CT:   GTACAGCT
+      H3K27me3_MS549CT:  GATCGTAC
+
+  MS549_CT:
+    fastq_path: /date/gcb/gcb_wq/nanoCTAR/raw_data/MS549_CT/
+    platform: mgi
+    barcodes:
+      H3K27ac: CCTATCCT
+      H3K27me3: ATAGAGGC
+
+
+
+general:
+  reference_yaml: /home/mattia/Multi_nanoCTRNA/config/qc_references_example.yaml       # older-dataset QC comparison (nanoCT, 10x multiome, Droplet Paired-Tag, scCUT&Tag-pro)
+  compute_tss: true                                                                    # TSS enrichment in QC + meta-profiles (heavy, not cached)
+  dataset_label: Human-MS                                                             # label for the current run in the QC benchmark
+  tempdir: /date/gcb/gcb_MZ/multiNanoCT/samples/Embryo/                                # Modify path to a tmp folder already created here
+  cellranger_software: /home/mattia/cellranger-atac-2.2.0/bin/cellranger-atac          # Modify the path to cellranger binaries here
+  cellranger_software_RNA: /home/mattia/cellranger-9.0.1/bin/cellranger
+  cellranger_software_arc: /data/bin/cellranger-arc2
+  cellranger_ref:  /date/gcb/gcb_MZ/refdata-cellranger-arc-GRCh38-2020-A-2.0.0/        # Modify the path to cellranger reference here
+  cellranger_ref_RNA: /home/mattia/refdata-gex-GRCh38-2020-A                           # Modify the path to cellranger reference here
+  macs_genome: hs
+  workflow_dir: /home/mattia/nanoCTAR/                                                 # Modify genome for macs2 callpeak
+  norm: none                                                                           # normalization for cellranger arc
+  chrom_sizes: /home/mattia/refdata-cellranger-arc-mm10-2020-A-2.0.0/star/chrNameLength.txt

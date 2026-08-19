@@ -1,0 +1,414 @@
+---
+title: "RNA PBMCs"
+author: "Mattia Zaghi"
+date: "2025-09-04"
+output: html_document
+---
+
+## 1. Data loading (metadata and fragments)
+In this section we are going to load the input files for each modality and sample, create a fragment object for each experiment, generate a bins x cell matrix for each experiment and finally generate one Seurat object for experiment.
+
+* Inputs of this section are the ```fragments.tsv.gz``` and ```metadata.csv``` files.\
+* Output of his section is a Seurat object for each experiment (6 in this case [2 samples * 3 modalities]).\
+
+First, load all the required libraries.
+
+```{r setup2}
+rm(list = ls())
+library(Signac)
+library(Seurat)
+library(GenomicRanges)
+library(future)
+library(stringr)
+library(ggplot2)
+library(gghalves)
+library(ggpubr)
+library(EnsDb.Hsapiens.v86)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(ComplexUpset)
+library(regioneR)
+library(scales)
+library(ggVennDiagram)
+library(hdf5r)
+```
+
+
+### 1.1 Setting some initial variables
+First, define some variables that will be used across the entire vignette. Modify them according to your data.\
+
+**Extremely important:**
+
+1. set as ```repodir``` the directory where the [nanoscope Github repo](https://github.com/bartosovic-lab/nanoscope/blob/main/README.md#clone-github-repository) is. This is required in order to upload all the custom functions needed to run this vignette\
+
+```{r init_var1 }
+# directory where the nanoscope repo was cloned
+repodir <- "/home/mattia/nanoCTAR/" # change accordingly
+source(paste0(repodir,"scripts/functions_scCT.R"))
+```
+
+
+2. set as ```wd``` the output root directory.\
+* If you are following [our tutorial](https://github.com/bartosovic-lab/nanoscope), please place the nanoscope output directories ```sample_P23209``` and ```sample_P24004``` in a directory called ```result``` and set it as working directory ```wd <- "~/NatProt/nanoscope/results/"```\
+* If you have skipped the tutorial and directly downloaded the toy data from [Zenodo](https://zenodo.org/record/7759368#.ZBrMcC-B3Eo), your ```wd``` will be ```/path/to/nanoscope_toy_data/results/```\
+* If you are running this vignette on your personal data please ensure that your ```wd``` is formatted as follow:\
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;- ```fragments.tsv.gz``` is expected to be in a folder with this path: ```wd/{sample_name}/{modality_barcode}/cellranger/outs/```\
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;- ```metadata.csv``` is expected to be in a folder with this path: ```wd/{sample_name}/{modality_barcode}/cell_picking/```\
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;-Note that this vignette assumes the same modalities to have the same barcodes across the different samples\
+
+**Please note that nothing but the directories containing the input data for each samples must be stored in ```wd```**
+```{r init_var2 }
+# directory where the nanoscope output files are stored
+require("knitr")
+opts_knit$set(root.dir = "/proj/user/mattia/hPBMCs/")# change accordingly
+
+#wd <- "~/NatProt/nanoscope/results" # change accordingly
+#setwd(wd)
+
+
+```
+
+
+
+3. set other variables (genome version, assay type, etc)
+```{r init_var3 }
+# Set the used genome version
+genome <- "hg38"
+# Genome annotations
+genome_ann <- EnsDb.Mmusculus.v79
+# BSgenome
+bs_genome <- BSgenome.Hsapiens.UCSC.hg38
+# Assay (peaks or bins)
+assay <- "bins"
+# Samples
+#samples <- dir()
+samples<-c("PBMCs_nanoCTAR_1","PBMCs_nanoCTAR_2")
+# Modalities
+#modalities <- dir(samples[1]) # this assumes sample1, sample2, sampleN share the same modalities and barcodes!
+modalities<-c("RNA_AAAAGGGG")
+# Minimum number of cells a feature must be detected in to be included in the Seurat obj
+min_cell <- 1
+# Minium number of features a cell must have to be included in the Seurat obj
+min_feat <- 1
+```
+
+
+
+###1.3 Create one Counts RNA object for each experiment
+```{r}
+##### RNA
+# Create one RNA object per each experiment iterating across the sample list. To do so you need change the working direcotry inside this chunk.
+# Samples
+samples <- samples
+counts_RNA.ls <- list()
+
+for (smpl in samples) {
+   for (mod in modalities) {
+  cat("Loading counts for sample",smpl,"\n")
+
+    # Load fragments
+counts_RNA.ls[[paste0(mod,"_",smpl)]]<-  Read10X_h5(paste0("/proj/user/mattia/hPBMCs/",smpl,"/RNA_AAAAGGGG/cellranger/outs/raw_feature_bc_matrix.h5"))
+
+   }
+}
+
+
+```
+
+
+Now we will create an RNA object list list and perform some QC before unifying all the objects
+```{r create_obj}
+obj.ls_RNA<-list()
+for (experim in names(counts_RNA.ls)) {
+  # Get sample and modality name from the experiment variable
+  smpl <- str_split_fixed(experim,"_",3)[,3]
+  modality <- str_split_fixed(experim,"_",2)[,1]
+
+  
+  # Create the object
+  obj.ls_RNA[[paste0(experim)]]<- CreateSeuratObject(counts = counts_RNA.ls[[paste0(experim)]],
+                                            assay = "RNA",
+                                            project = smpl,  min.cells = 1,
+  min.features = 1)
+
+    obj.ls_RNA[[paste0(experim)]]@meta.data$barcode_RNA<- colnames(obj.ls_RNA[[paste0(experim)]])
+    obj.ls_RNA[[paste0(experim)]][["percent.mt"]] <- PercentageFeatureSet(obj.ls_RNA[[paste0(experim)]], pattern = "^MT-")
+    # Add some metadata of origin
+  obj.ls_RNA[[paste0(experim)]]$dataset <- experim
+  obj.ls_RNA[[paste0(experim)]]$modality <- modality
+  obj.ls_RNA[[paste0(experim)]]$sample <- smpl
+}
+
+```
+
+UNique RNA merged object
+
+
+```{r}
+# Merge list
+combined.obj_RNA <- list()
+
+    for (mod in modalities) {
+
+  # merge objects among the different samples
+  combined.obj_RNA[[mod]] <- merge(obj.ls_RNA[[paste0(mod,"_",samples[1])]],
+                                  y = obj.ls_RNA[[paste0(mod,"_",samples[2])]])
+
+}
+
+
+```
+
+
+QC and bad cells filtering
+
+Let's first plot some QCs 
+
+```{r}
+# The [[ operator can add columns to Oligoect metadata. This is a great place to stash QC stats
+combined.obj_RNA[["RNA_AAAAGGGG"]][["percent.mt"]] <- PercentageFeatureSet(combined.obj_RNA[["RNA_AAAAGGGG"]], pattern = "^MT-")
+```
+
+```{r}
+# FeatureScatter is typically used to visualize feature-feature relationships, but can be used
+# for anything calculated by the Oligoect, i.e. columns in Oligoect metadata, PC scores etc.
+
+plot1 <- FeatureScatter(combined.obj_RNA[["RNA_AAAAGGGG"]], feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(combined.obj_RNA[["RNA_AAAAGGGG"]], feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1 + plot2
+
+```
+
+Final subsetting
+
+```{r}
+combined.obj_RNA[["RNA_AAAAGGGG"]] <- subset(combined.obj_RNA[["RNA_AAAAGGGG"]], subset = nFeature_RNA > 200 & nFeature_RNA < 7500 & percent.mt < 10)
+```
+
+
+QCs value after subsetting 
+
+```{r}
+# Visualize QC metrics as a violin plot
+
+QC_RNA <- data.frame(sample =  combined.obj_RNA[["RNA_AAAAGGGG"]]@meta.data[["orig.ident"]],
+                     Genes = combined.obj_RNA[["RNA_AAAAGGGG"]]@meta.data[["nFeature_RNA"]],
+                     RNA = combined.obj_RNA[["RNA_AAAAGGGG"]]@meta.data[["nCount_RNA"]],
+                     Mt = combined.obj_RNA[["RNA_AAAAGGGG"]]@meta.data[["percent.mt"]])
+QC_RNA$sample <- as.factor(QC_RNA$sample)
+
+# Function to add mean and median annotations for each sample above the violin plots
+add_mean_median_annotation <- function(plot, data, x_var, y_var) {
+  samples <- unique(data[[x_var]])
+  for (sample in samples) {
+    sample_data <- data[data[[x_var]] == sample, ]
+    mean_value <- mean(sample_data[[y_var]], na.rm = TRUE)
+    median_value <- median(sample_data[[y_var]], na.rm = TRUE)
+    plot <- plot + 
+      annotate("text", x = sample, y = max(sample_data[[y_var]], na.rm = TRUE) * 1.05, 
+               label = paste("Mean:", round(mean_value, 2)), color = "blue", size = 5, fontface = "bold") +
+      annotate("text", x = sample, y = max(sample_data[[y_var]], na.rm = TRUE) * 1.50, 
+               label = paste("Median:", round(median_value, 2)), color = "red", size = 5, fontface = "bold")
+  }
+  return(plot)
+}
+
+# Plot for RNA
+Transcripts <- ggplot(QC_RNA) +
+  aes(x = sample, y = RNA, fill = sample, color = sample) +
+  geom_violin(trim = TRUE, color = "#000000") +
+  geom_boxplot(width = 0.1, color = "#000000", fill = "#ffffff", outlier.shape = NA) +
+  scale_fill_manual(values = c("#31FF00", "#005DFF","#FFE600","#A2FF00", "#31FF00", "#00FF45", "#00FFBB","#00D3FF"))+#,, , "#00FFBB","#00D3FF", "#005DFF", "#1900FF", "#8A00FF", "#FA00F9", "#FF0088"))+  #, , )) +
+  scale_color_manual(values = c("#31FF00", "#005DFF","#FFE600","#A2FF00", "#31FF00", "#00FF45", "#00FFBB","#00D3FF"))+# "#005DFF", "#1900FF", "#8A00FF", "#FA00F9", "#FF0088"))+ #, , "#00D3FF", "#005DFF", "#1900FF", "#8A00FF", "#FA00F9", "#FF0088")) +
+  ggthemes::theme_base() +
+  xlab("") +
+  ylab("Number of UMI per cell") +
+  theme(panel.border = element_rect()) +
+  theme_classic() + theme(legend.position = "none") +
+  theme(axis.text.x = element_text(size = 18, family = "Arial", angle = 45, hjust = 1),
+        axis.text.y = element_text(size = 18, family = "Arial"),
+        axis.title.y = element_text(size = 18, family = "Arial"),
+        axis.line = element_line(size = 1))
+
+Transcripts <- add_mean_median_annotation(Transcripts, QC_RNA, "sample", "RNA")
+
+# Plot for Genes
+Genes <- ggplot(QC_RNA) +
+  aes(x = sample, y = Genes, fill = sample, color = sample) +
+  geom_violin(trim = TRUE, color = "#000000") +
+  geom_boxplot(width = 0.1, color = "#000000", fill = "#ffffff", outlier.shape = NA) +
+  scale_fill_manual(values = c("#31FF00", "#005DFF","#FFE600","#A2FF00", "#31FF00", "#00FF45", "#00FFBB","#00D3FF"))+#,, , "#00FFBB","#00D3FF", "#005DFF", "#1900FF", "#8A00FF", "#FA00F9", "#FF0088"))+  #, , )) +
+  scale_color_manual(values = c("#31FF00", "#005DFF","#FFE600","#A2FF00", "#31FF00", "#00FF45", "#00FFBB","#00D3FF"))+# "#005DFF", "#1900FF", "#8A00FF", "#FA00F9", "#FF0088"))+ #, , "#00D3FF", "#005DFF", "#1900FF", "#8A00FF", "#FA00F9", "#FF0088")) +
+  ggthemes::theme_base() +
+  xlab("") +
+  ylab("Number of Genes per cell") +
+  theme(panel.border = element_rect()) +
+  theme_classic() + theme(legend.position = "none") +
+  theme(axis.text.x = element_text(size = 18, family = "Arial", angle = 45, hjust = 1),
+        axis.text.y = element_text(size = 18, family = "Arial"),
+        axis.title.y = element_text(size = 18, family = "Arial"),
+        axis.line = element_line(size = 1))
+
+Genes <- add_mean_median_annotation(Genes, QC_RNA, "sample", "Genes")
+
+# Plot for Mt
+Mt <- ggplot(QC_RNA) +
+  aes(x = sample, y =   Mt, fill = sample, color = sample) +
+  geom_violin(trim = TRUE, color = "#000000") +
+  geom_boxplot(width = 0.1, color = "#000000", fill = "#ffffff", outlier.shape = NA) +
+  scale_fill_manual(values = c("#31FF00", "#005DFF","#FFE600","#A2FF00", "#31FF00", "#00FF45", "#00FFBB","#00D3FF"))+#,, , "#00FFBB","#00D3FF", "#005DFF", "#1900FF", "#8A00FF", "#FA00F9", "#FF0088"))+  #, , )) +
+  scale_color_manual(values = c("#31FF00", "#005DFF","#FFE600","#A2FF00", "#31FF00", "#00FF45", "#00FFBB","#00D3FF"))+# "#005DFF", "#1900FF", "#8A00FF", "#FA00F9", "#FF0088"))+ #, , "#00D3FF", "#005DFF", "#1900FF", "#8A00FF", "#FA00F9", "#FF0088")) +
+  ggthemes::theme_base() +
+  xlab("") +
+  ylab("Percentage of Mt genes") +
+  theme(panel.border = element_rect()) +
+  theme_classic() + theme(legend.position = "none") +
+  theme(axis.text.x = element_text(size = 18, family = "Arial", angle = 45, hjust = 1),
+        axis.text.y = element_text(size = 18, family = "Arial"),
+        axis.title.y = element_text(size = 18, family = "Arial"),
+        axis.line = element_line(size = 1))
+
+Mt <- add_mean_median_annotation(Mt, QC_RNA, "sample", "Mt")
+
+Transcripts
+Genes
+Mt
+plots <- list(UMI_hPBMCs=Transcripts,Genes_hPBMCs=Genes,Mt_hPBMCs=Mt)
+for (nm in names(plots)) {
+ggplot2::ggsave(file.path("/proj/user/mattia/hPBMCs/Plots/", paste0(nm, ".png")), plots[[nm]], width = 14, height = 16, dpi = 300)
+}
+#how many cells 
+
+cells_numer<-as.data.frame(table(combined.obj_RNA[["RNA_AAAAGGGG"]]@meta.data[["orig.ident"]]))
+
+```
+
+2. Dimensionality reduction and clustering 
+
+
+First we will perform the analysis without data integration 
+
+```{r}
+combined.obj_RNA[["RNA_AAAAGGGG"]] <- NormalizeData(combined.obj_RNA[["RNA_AAAAGGGG"]])
+combined.obj_RNA[["RNA_AAAAGGGG"]] <- FindVariableFeatures(combined.obj_RNA[["RNA_AAAAGGGG"]])
+combined.obj_RNA[["RNA_AAAAGGGG"]] <- ScaleData(combined.obj_RNA[["RNA_AAAAGGGG"]])
+combined.obj_RNA[["RNA_AAAAGGGG"]] <- RunPCA(combined.obj_RNA[["RNA_AAAAGGGG"]])
+```
+elbow plot
+
+```{r}
+p1<-ElbowPlot(combined.obj_RNA[["RNA_AAAAGGGG"]])
+p1
+```
+
+Clustering without data integration
+
+
+```{r}
+combined.obj_RNA[["RNA_AAAAGGGG"]] <- FindNeighbors(combined.obj_RNA[["RNA_AAAAGGGG"]], dims = 1:15, reduction = "pca")
+combined.obj_RNA[["RNA_AAAAGGGG"]] <- FindClusters(combined.obj_RNA[["RNA_AAAAGGGG"]], resolution = 2, cluster.name = "unintegrated_clusters")
+```
+
+
+```{r}
+combined.obj_RNA[["RNA_AAAAGGGG"]] <- RunUMAP(combined.obj_RNA[["RNA_AAAAGGGG"]], dims = 1:15, reduction = "pca", reduction.name = "umap.unintegrated")
+
+p1<-DimPlot(combined.obj_RNA[["RNA_AAAAGGGG"]], reduction = "umap.unintegrated", group.by = c("unintegrated_clusters"))
+p2<-DimPlot(combined.obj_RNA[["RNA_AAAAGGGG"]], reduction = "umap.unintegrated", group.by = c("orig.ident"))
+p1
+p2
+```
+
+Now clustering with integration based on SCTtransform will be performed 
+
+```{r}
+options(future.globals.maxSize = 140e+09)
+combined.obj_RNA[["RNA_AAAAGGGG"]] <- SCTransform(combined.obj_RNA[["RNA_AAAAGGGG"]])
+combined.obj_RNA[["RNA_AAAAGGGG"]] <- RunPCA(combined.obj_RNA[["RNA_AAAAGGGG"]], npcs = 30, verbose = F)
+combined.obj_RNA[["RNA_AAAAGGGG"]] <- IntegrateLayers(
+  object = combined.obj_RNA[["RNA_AAAAGGGG"]],
+  method = RPCAIntegration,
+  normalization.method = "SCT",
+  verbose = F
+)
+combined.obj_RNA[["RNA_AAAAGGGG"]] <- FindNeighbors(combined.obj_RNA[["RNA_AAAAGGGG"]], dims = 1:15, reduction = "integrated.dr")
+combined.obj_RNA[["RNA_AAAAGGGG"]] <- FindClusters(combined.obj_RNA[["RNA_AAAAGGGG"]], resolution = 0.9,cluster.name = "rpca_SCT_clusters")
+```
+
+Perform dimensionality reduction and plot it 
+
+
+```{r}
+combined.obj_RNA[["RNA_AAAAGGGG"]]  <- RunUMAP(combined.obj_RNA[["RNA_AAAAGGGG"]] , dims = 1:15, reduction = "integrated.dr",reduction.name = "umap.rpca_SCT")
+```
+
+plot UMAP
+
+
+```{r}
+
+p1<-DimPlot(combined.obj_RNA[["RNA_AAAAGGGG"]], reduction = "umap.rpca_SCT", group.by = c("rpca_SCT_clusters"))
+p2<-DimPlot(combined.obj_RNA[["RNA_AAAAGGGG"]], reduction = "umap.rpca_SCT", group.by = c("orig.ident"))
+
+
+p1
+p2
+
+plots <- list(UMAP_clusters=p1,UMAP_samples=p2)
+for (nm in names(plots)) {
+ggplot2::ggsave(file.path("/proj/user/mattia/hPBMCs/Plots/", paste0(nm, ".png")), plots[[nm]], width =14, height = 16, dpi = 300)
+}
+
+
+#saveRDS(combined.obj_RNA[["RNA_AAAAGGGG"]],"/proj/user/mattia/Embryo_2/combined.obj_RNA_PBMCs.rds")
+```
+Now let' plot some PBMCs markers
+
+
+```{r}
+markers <- c("CD3E", "TRAC", "IL17R", "CD8B", "CCR7", "FOXP3","TRDC","GNLY","FCGR3A",
+             "SELL","CD79A","IGHD","CD27","CD38","LYZ","WDFY4","FCER1A","S100A8",
+             "CD14","TCF4","GNG11")
+
+
+
+
+p1<-DotPlot(combined.obj_RNA[["RNA_AAAAGGGG"]], features = markers,group.by = "rpca_SCT_clusters",cols = c("lightgrey", "firebrick"))+
+  xlab("")+
+  theme(
+    axis.text.x = element_text( hjust = 1, vjust = 0.5, family = "Arial", size = 20,angle = 90),
+    axis.text.y = element_text(family = "Arial", size = 20),
+    axis.title.y = element_text(family = "Arial", size =24),
+    legend.text = element_text(size = 20,family = "Arial"),
+    legend.title = element_text(size = 24,family = "Arial")
+  ) 
+p2<-FeaturePlot(combined.obj_RNA[["RNA_AAAAGGGG"]],reduction = "umap.rpca_SCT",features = markers)
+plots <- list(DotPlot_markers=p1,feature_plot=p2)
+for (nm in names(plots)) {
+ggplot2::ggsave(file.path("/proj/user/mattia/Embryo_2/plots/", paste0(nm, ".png")), plots[[nm]], width =14, height = 16, dpi = 300)
+}
+p1
+p2
+
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

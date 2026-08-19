@@ -1,0 +1,23 @@
+# first_eval.sub — run the first-evaluation report as a single HTCondor job
+# (the no-Snakemake route). Submit with:
+#     condor_submit workflow/first_eval.sub
+#
+# Edit initialdir / the wd=, fig_dir=, out_html= paths to point at your analysis
+# folder (the one holding the {sample}/{modality}_{barcode}/ outputs). The report
+# DISCOVERS experiments from that folder, so no config is needed here.
+
+universe       = vanilla
+executable     = /bin/bash
+initialdir     = /date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS
+
+arguments      = "-lc 'source /home/mattia/miniconda3_n/etc/profile.d/conda.sh && conda run -n nanoctarna-analysis Rscript /home/mattia/Multi_nanoCTRNA/analysis/main/render_first_eval.R wd=/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/ experiment_source=discover include_rna=FALSE fig_dir=/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/first_eval/figures out_html=/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/first_eval/first_eval_report.html'"
+
+request_cpus   = 4
+request_memory = 64 GB
+request_disk   = 8 GB
+
+log            = first_eval.condor.log
+output         = first_eval.condor.out
+error          = first_eval.condor.err
+
+queue

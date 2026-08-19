@@ -1,0 +1,14 @@
+outdir: /date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/IGV_clusters/results_ATAC
+barcodes_dir: /date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/IGV_clusters/barcodes_ATAC/
+barcodetag: CB
+threads: 8
+binsize: 10
+normalize: RPGC                       # RPGC / CPM / BPM are more comparable across clusters
+effective_genome_size: 2913022398     # GRCh38; mm10 = 2652783500
+blacklist: ''                         # optional path to a blacklist BED, or '' to skip
+merge_across_experiments: false    # true -> also pool each cluster across experiments
+
+bams:
+  PBMC_CT_ATAC: /date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/PBMC/PBMC_CT/ATAC_TATAGCCT/cellranger/outs/possorted_bam.bam
+  PBMC_DynaTag_ATAC: /date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/PBMC/PBMC_DynaTag/ATAC_TATAGCCT/cellranger/outs/possorted_bam.bam
+

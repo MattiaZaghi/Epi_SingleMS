@@ -1,0 +1,1152 @@
+---
+title: "First evaluation — interactive"
+author: "Mattia Zaghi"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+Interactive companion to `first_eval_MGI.Rmd`. Unlike the report (which is
+parametrised and meant to be rendered by snakemake), this one **defines its
+config in a plain chunk** so you can run it **chunk-by-chunk in RStudio**
+(Ctrl/Cmd+Enter) and continue the analysis. It **loads the objects the report
+already saved** — no rebuilding.
+
+Needs an R with the analysis packages (Signac/Seurat/...): your usual RStudio R,
+or `conda activate nanoctarna-analysis; rstudio`.
+
+```{r setup, message=FALSE, warning=FALSE}
+# ---- libraries + helper functions + genome --------------------------------
+suppressPackageStartupMessages({
+  library(Signac); library(Seurat); library(GenomicRanges)
+  library(stringr); library(dplyr); library(ggplot2); library(ggpubr)
+  library(yaml); library(ggVennDiagram); library(ComplexUpset)
+  library(EnsDb.Hsapiens.v86); library(BSgenome.Hsapiens.UCSC.hg38)
+})
+repodir <- "/home/mattia/Multi_nanoCTRNA"
+source(file.path(repodir, "scripts", "functions_scCT.R"))       # plotCounts, DepthCorMulMod, ...
+source(file.path(repodir, "scripts", "functions_firstEval.R"))  # config-driven first-eval helpers
+
+genome     <- "hg38"
+genome_ann <- EnsDb.Hsapiens.v86
+bs_genome  <- BSgenome.Hsapiens.UCSC.hg38
+```
+
+## Config (edit if your run is elsewhere)
+
+`params` is a plain list here (not YAML), so every chunk that uses `params$...`
+— including chunks copied from `first_eval_MGI.Rmd` — works when run interactively.
+
+```{r config}
+wd         <- "/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction/"   # analysis root
+result_dir <- file.path(wd, "first_eval")
+obj_dir    <- file.path(result_dir, "objects")
+
+params <- list(
+  wd            = paste0(wd, "/"),
+  binsize       = 5000,
+  filter_passed = TRUE,
+  dims          = 30,
+  resolution    = 0.6,
+  workers       = 4,
+  group_pattern = "^(PBMCs)",#"^(MS|PBMC)", now only PBMCs
+  fig_dir       = file.path(result_dir, "figures"),
+  fig_scale     = 1.25
+)
+dir.create(params$fig_dir, recursive = TRUE, showWarnings = FALSE)
+fig_scale <- params$fig_scale
+SP <- function(p, nm, w = 8, h = 6)                     # same figure saver as the report
+  save_png(p, nm, params$fig_dir, w * fig_scale, h * fig_scale)
+```
+
+## Load what the report already built
+
+```{r load-objects}
+load_if <- function(f) if (file.exists(f)) readRDS(f) else {
+  message("not found (run the report first): ", f); NULL }
+
+obj.ls    <- load_if(file.path(obj_dir, "obj.ls_bins.rds"))            # list keyed by experiment
+#merged.ls <- load_if(file.path(obj_dir, "merged.ls_group_mark.rds"))  # list keyed by "group|mark"
+#cell_df   <- load_if(file.path(obj_dir, "qc_cell_df.rds"))            # per-cell QC table
+# also available individually (per group), and the raw 5kb matrices:
+#   merged_MS   <- load_if(file.path(obj_dir, "merged_MS.rds"))       # list(H3K27ac=, H3K27me3=)
+#   merged_PBMC <- load_if(file.path(obj_dir, "merged_PBMC.rds"))
+#   counts.ls   <- load_if(file.path(obj_dir, paste0("counts.ls_bins_", params$binsize, ".rds")))
+
+cat("obj.ls   :", if (is.null(obj.ls))    "-" else paste(length(obj.ls), "experiments"), "\n",
+    "merged.ls:", if (is.null(merged.ls)) "-" else paste(names(merged.ls), collapse = ", "), "\n",
+    "cell_df  :", if (is.null(cell_df))   "-" else paste(nrow(cell_df), "cells"), "\n")
+```
+
+## Doublet removal (AMULET) -- must run before merge/cluster, on obj.ls
+
+`obj.ls` still has one Signac object per experiment with native (unprefixed)
+barcodes -- exactly what AMULET needs, since it scores multiplets from a
+single experiment's `fragments_raw.tsv.gz`. We flag+drop doublets here, then
+rebuild `merged.ls` from the cleaned `obj.ls` (cheap: `merge_by_group_mark`
+just re-merges already-computed objects, no matrix rebuild).
+
+```{r doublets_amulet}
+amulet_dir <- "/home/mattia/AMULET"                                   # AMULET.py location
+chrlist    <-  file.path(amulet_dir, "ref/chrName.txt")        # TODO: add to config/ (hg38)
+blacklist  <- file.path(amulet_dir, "ref/hg38.blacklist.bed") # TODO: add to config/ (hg38)
+
+# AMULET needs pandas/numpy/pysam -- neither nanoscope_general nor
+# nanoscope_debarcode ship pandas, so it gets its own tiny env
+# (envs/nanoscope_amulet.yaml): `conda env create -f envs/nanoscope_amulet.yaml`.
+# system() spawns a plain subshell that does NOT re-source your `conda activate`,
+# so point it at the env's python by absolute path rather than relying on
+# whatever "python" happens to be on PATH when this is run from RStudio.
+amulet_python <- "/home/mattia/miniconda3_n//envs/nanoscope_amulet/bin/python3"  # adjust to your conda prefix
+stopifnot("amulet_python not found -- fix the path or `conda env create -f envs/nanoscope_amulet.yaml`" =
+            file.exists(amulet_python))
+
+# exp_id -> fragments file, without assuming barcode format. Splits on the
+# FIRST "." (sample never contains one; modality might in principle, but
+# doesn't in this config) and globs <wd>/<sample>/<modality>_*/... for the
+# cellranger outs dir, so it matches "H3K27ac_MS058", "H3K27ac_CCTATCCT", etc.
+find_fragments <- function(exp_id, wd) {
+  sample   <- sub("\\..*$", "", exp_id)
+  modality <- sub("^[^.]+\\.", "", exp_id)
+  exp_dir  <- Sys.glob(file.path(wd, sample, paste0(modality, "_*")))
+  if (length(exp_dir) == 0) return(NA_character_)
+  cand <- Sys.glob(file.path(exp_dir, "cellranger", "outs",
+                             c("fragments_raw.tsv.gz", "fragments.tsv.gz")))
+  if (length(cand) == 0) return(NA_character_)
+  cand[1]
+}
+
+# AMULET is a two-step CLI, not one call (there is no --forcesorted flag on
+# either script -- that's what the earlier run errored on):
+#   1) FragmentFileOverlapCounter.py <fragments> <bcmap.csv> <chrlist> <outdir>
+#      -> writes Overlaps.txt / OverlapSummary.txt into <outdir>. <bcmap.csv>
+#      must be a csv *with a header row*, columns "barcode" and
+#      "is__cell_barcode" (rows kept where == 1) -- not the one-barcode-
+#      per-line file this chunk used to write.
+#   2) AMULET.py --rfilter <blacklist.bed> <Overlaps.txt> <OverlapSummary.txt> <outdir2>
+#      -> the repeat blacklist is only ever an AMULET.py argument
+#      (--rfilter); it does not go into step 1 at all.
+flag_doublets_amulet <- function(exp_id, obj, wd, qval_cutoff = 0.05) {
+  frag <- find_fragments(exp_id, wd)
+  if (is.na(frag)) { message("no fragments for ", exp_id, ", skipping"); return(obj) }
+
+  counter_dir <- file.path(obj_dir, "amulet", exp_id, "overlaps")
+  amulet_out  <- file.path(obj_dir, "amulet", exp_id, "multiplets")
+  dir.create(counter_dir, recursive = TRUE, showWarnings = FALSE)
+  dir.create(amulet_out,  recursive = TRUE, showWarnings = FALSE)
+
+  # BCMAP: header "barcode,is__cell_barcode" -- score only cells that passed
+  # pick_cells.R, so every row here is a valid cell (is__cell_barcode = 1)
+  bc_file <- file.path(counter_dir, "singlecell.csv")
+  write.csv(data.frame(barcode = colnames(obj), is__cell_barcode = 1L,
+                        check.names = FALSE),
+            bc_file, row.names = FALSE, quote = FALSE)
+
+  # step 1: per-fragment overlap counting (no --rfilter here)
+  system(sprintf("%s %s/FragmentFileOverlapCounter.py %s %s %s %s",
+                  amulet_python, amulet_dir, frag, bc_file, chrlist, counter_dir))
+
+  overlaps_path <- file.path(counter_dir, "Overlaps.txt")
+  summary_path  <- file.path(counter_dir, "OverlapSummary.txt")
+  if (!file.exists(overlaps_path) || !file.exists(summary_path)) {
+    message("FragmentFileOverlapCounter produced no output for ", exp_id); return(obj)
+  }
+
+  # step 2: multiplet probability estimation; blacklist goes here via --rfilter
+  system(sprintf("%s %s/AMULET.py --rfilter %s %s %s %s",
+                  amulet_python, amulet_dir, blacklist, overlaps_path, summary_path, amulet_out))
+
+  probs_path <- file.path(amulet_out, "MultipletProbabilities.txt")
+  if (!file.exists(probs_path)) { message("AMULET produced no output for ", exp_id); return(obj) }
+
+  # AMULET.py writes columns cell_id, barcode, p-value, q-value and already
+  # BH-corrects q-value itself -- no need to re-run p.adjust. Match by
+  # barcode explicitly rather than assuming row order/rownames.
+  probs <- read.delim(probs_path, check.names = FALSE)
+  qval  <- setNames(probs[["q-value"]], probs[["barcode"]])[colnames(obj)]
+  obj$amulet_qval       <- qval
+  obj$is_doublet_amulet <- qval < qval_cutoff
+  obj
+}
+
+obj.ls <- Map(flag_doublets_amulet, names(obj.ls), obj.ls, MoreArgs = list(wd = params$wd))
+saveRDS(obj.ls,"/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/first_eval/objects/obj.ls_bins_Amulet.rds")
+n_scored   <- sum(sapply(obj.ls, function(o) !is.null(o$is_doublet_amulet)))
+n_doublets <- sum(sapply(obj.ls, function(o) if (is.null(o$is_doublet_amulet)) 0 else sum(o$is_doublet_amulet, na.rm = TRUE)))
+cat(n_doublets, "multiplets flagged across", n_scored, "of", length(obj.ls), "experiments",
+    "(the rest had no fragments file found -- check find_fragments() against your layout)\n")
+
+# drop flagged cells from obj.ls (native names) and from merged.ls (which may
+# have prefixed names "<exp_id>_<barcode>" only for marks merged from >1 exp)
+for (id in names(obj.ls)) {
+  o <- obj.ls[[id]]
+  if (is.null(o$is_doublet_amulet)) next
+  bad <- colnames(o)[o$is_doublet_amulet]
+  if (length(bad) == 0) next
+  obj.ls[[id]] <- subset(o, cells = colnames(o)[!o$is_doublet_amulet])
+  for (nm in names(merged.ls)) {
+    m    <- merged.ls[[nm]]
+    drop <- intersect(colnames(m), c(bad, paste0(id, "_", bad)))
+    if (length(drop) > 0) merged.ls[[nm]] <- subset(m, cells = setdiff(colnames(m), drop))
+  }
+}
+```
+create a merged MS object
+
+```{r merge_modalities}
+
+merged.ls <- merge_by_group_mark(obj.ls, exp_df, group_pattern = params$group_pattern)
+cat("Joint groups (type x mark):", paste(names(merged.ls), collapse = ", "), "\n")
+
+grp_names <- names(merged.ls)
+merged.ls <- .par_lapply(grp_names, function(nm) {
+  tryCatch(
+    normalize_dr(merged.ls[[nm]], min_cutoff = 5),
+    error = function(e) {
+      message("normalize_dr failed for '", nm, "': ", conditionMessage(e))
+      merged.ls[[nm]]
+    }
+  )
+})
+names(merged.ls) <- grp_names
+```
+
+
+
+
+```{r batch_harmony}
+
+suppressPackageStartupMessages(library(harmony))
+
+# 1) technology, from sample
+merged.ls$`H3K27ac`@meta.data$technology <- case_when(
+  merged.ls$`H3K27ac`@meta.data$sample %in% c("MS3BL1_CT", "MS3BL2_CT") ~ "GEM-X",
+  merged.ls$`H3K27ac`@meta.data$sample  == "MS549_CT"                ~ "Next-GEM",
+  TRUE                                     ~ NA_character_
+)
+
+merged.ls$`H3K27me3`$technology <- case_when(
+  merged.ls$`H3K27me3`@meta.data$sample %in% c("MS3BL1_CT", "MS3BL2_CT") ~ "GEM-X",
+  merged.ls$`H3K27me3`@meta.data$sample  == "MS549_CT"                ~ "Next-GEM",
+  TRUE                                     ~ NA_character_
+)
+
+
+# 2) protocol, from sample AND the technology just derived above
+merged.ls$`H3K27ac`@meta.data$protocol <- case_when(
+  merged.ls$`H3K27ac`@meta.data$patient %in% c("MS058CT1", "MS058CT2", "MS381CT1","MS381CT2","MS549_CT") ~ "fresh",
+  merged.ls$`H3K27ac`@meta.data$patient == "MS549CT" ~ "frozen",
+  TRUE                                                                        ~ NA_character_
+)
+
+merged.ls$`H3K27me3`@meta.data$protocol <- case_when(
+  merged.ls$`H3K27me3`@meta.data$patient %in% c("MS058CT1", "MS058CT2", "MS381CT1","MS381CT2","MS549_CT") ~  "fresh" ,
+  merged.ls$`H3K27me3`@meta.data$patient == "MS549CT"~"frozen",
+  TRUE                                                                        ~ NA_character_
+)
+
+
+merged.ls <- lapply(merged.ls, function(obj) {
+  #obj <- RunTFIDF(obj) > FindTopFeatures(min.cutoff = 5) > RunSVD()
+  obj <- RunHarmony(obj, group.by.vars = c("technology","protocol"),
+                    reduction.use = "lsi", reduction.save = "harmony_lsi",
+                    project.dim = FALSE)
+  obj <- RunUMAP(obj, reduction = "harmony_lsi", di = 2:params$dims, reduction.name = "umap_harmony")
+  obj <- FindNeighbors(obj, reduction = "harmony_lsi", di = 2:params$dims)
+  obj <- FindClusters(obj, resolution = params$resolution, algorithm = 3, verbose = FALSE,cluster.name="harmony_clusters",graph.name = "bins_snn")
+  obj
+})
+```
+
+
+```{r umaps, fig.width=12, fig.height=6}
+nm  <- "MS|H3K27ac"                       # pick any name from names(merged.ls)
+obj <- merged.ls[[nm]]
+
+p_clu <- DimPlot(obj, reduction = "umap_harmony", label = TRUE) + NoLegend() + ggtitle(nm)
+p_smp <- DimPlot(obj, reduction = "umap_harmony", group.by = "sample")  + ggtitle("sample")
+p_pat <- DimPlot(obj, reduction = "umap_harmony", group.by = "patient") + ggtitle("patient")
+ggarrange(p_clu, p_smp, p_pat, ncol = 3)
+
+```
+
+```{r recluster}
+# re-cluster / re-embed with different parameters and inspect
+obj <- FindClusters(obj, resolution = 0.4, algorithm = 3, verbose = FALSE)
+DimPlot(obj, reduction = "umap", label = TRUE) + NoLegend()
+```
+
+## Continue: QC of any metric (from the saved cell_df)
+
+```{r qc}
+# metrics available: logUMI, nCount_bins, passed_filters, reads, dup_rate, FRiP, TSS_enrichment
+qc_metric_violin(cell_df, "nCount_bins", ylab = "unique fragments (bins)", log_y = TRUE)
+# per group:
+# qc_metric_violin(cell_df, "TSS_enrichment", ylab = "TSS enrichment", group = "MS")
+```
+
+## (Optional) rebuild instead of loading
+
+Only if you changed something upstream. Reuses the cached 5kb matrices, so it's fast.
+
+```{r rebuild, eval=FALSE}
+exp_df  <- discover_experiments(params$wd)
+meta.ls <- load_metadata_list(exp_df, params$wd, filter_passed = params$filter_passed)
+obj.ls  <- build_bins_objects(
+  exp_df, meta.ls, params$wd, bs_genome = bs_genome, binsize = params$binsize,
+  counts_cache = readRDS(file.path(obj_dir, paste0("counts.ls_bins_", params$binsize, ".rds"))))
+```
+
+## Create gene activity for label transfer with Mukund Dataset
+### 6.1 Add gene annotations to the Seurat object
+Before creating a gene activity matrix we first need to add gene annotations to the H3K27ac Seurat object.
+```{r add_gene_ann }
+# get gene annotations from Ensembl
+annotations <- GetGRangesFromEnsDb(ensdb = genome_ann)
+
+# change to UCSC style since the data was mapped to mm10
+seqlevelsStyle(annotations) <- 'UCSC'
+
+# add the gene information to the object
+Annotation(merged.ls$`MS|H3K27ac`) <- annotations
+```
+
+```{r gene_activity}
+
+# Calculate gene activities
+gene.activities <- GeneActivity(merged.ls$`MS|H3K27ac`)
+
+# Add the gene activity matrix to the Seurat object as a new assay
+merged.ls$`MS|H3K27ac`[['RNA']] <- CreateAssayObject(counts = gene.activities)
+# Set RNA as default assay
+DefaultAssay(merged.ls$`MS|H3K27ac`) <- 'RNA'
+# normalize RNA data
+merged.ls$`MS|H3K27ac` <- NormalizeData(merged.ls$`MS|H3K27ac`) |>
+            FindVariableFeatures() |>
+            ScaleData()
+
+```
+
+```{r}
+Human_H3K27ac_nanoCT <- readRDS("/date/gcb/gcb_wq/MS_project/reference_datasets/Kabbe_2026_nCT_rds/processed_data/H3K27ac_GRS_anno_EA.rds")
+
+DefaultAssay(Human_H3K27ac_nanoCT) <- 'PROM2KBGB'
+  
+feats   <- intersect(VariableFeatures(MS$H3K27ac@assays$RNA), rownames(Human_H3K27ac_nanoCT))
+ 
+anchors <- FindTransferAnchors(reference = Human_H3K27ac_nanoCT, query = MS$H3K27ac,
+               reference.assay = "PROM2KBGB", query.assay = "RNA",
+               reduction = "cca", dims = 1:50, features = feats)
+
+MS$H3K27ac <- MapQuery(
+  anchorset =anchors, 
+  reference = Human_H3K27ac_nanoCT,
+  query =   MS$H3K27ac,
+  refdata = "transferred_annot")
+ 
+#rename predictions columns 
+cn <- colnames(MS$H3K27ac@meta.data)
+cn[cn == "predicted.id"] <- "predicted.id_CZI_Human"
+cn[cn == "predicted.id.score"] <- "predicted.id.score_CZI_Human"
+colnames(MS$H3K27ac@meta.data) <- cn
+
+
+```
+
+
+```{r}
+Human_MS<- readRDS("/date/gcb/gcb_YD/MS_sc_project/MSref_brain_EA/ms_lesions_snRNAseq_seuratV5_WMEA_updated_fullFineLesionDown500.rds")
+new_names <- sub("-ENSG[0-9]+$", "", rownames(Human_MS))
+sum(duplicated(new_names))
+
+DefaultAssay(Human_MS) <- 'RNA'
+
+
+for (a in Assays(Human_MS)) {
+  rn <- rownames(Human_MS[[a]])
+  new_rn <- sub("-ENSG[0-9]+$", "", rn)
+  if (any(duplicated(new_rn))) new_rn <- make.unique(new_rn)
+  rownames(Human_MS[[a]]) <- new_rn
+}
+
+
+feats   <- intersect(VariableFeatures(merged.ls$`MS|H3K27ac`@assays$RNA), rownames(Human_MS))
+ 
+anchors <- FindTransferAnchors(reference = Human_MS, query = merged.ls$`MS|H3K27ac`,
+               reference.assay = "RNA", query.assay = "RNA",
+               reduction = "cca", dims = 1:50, features = feats)
+
+merged.ls$`MS|H3K27ac` <- MapQuery(
+  anchorset =anchors, 
+  reference = Human_MS,
+  query =   merged.ls$`MS|H3K27ac`,
+  refdata = "type_broad")
+ 
+#rename predictions columns 
+cn <- colnames(merged.ls$`MS|H3K27ac`@meta.data)
+cn[cn == "predicted.id"] <- "predicted.id_Human_MS"
+cn[cn == "predicted.id.score"] <- "predicted.id.score_Human_MS"
+colnames(merged.ls$`MS|H3K27ac`@meta.data) <- cn
+
+```
+
+```{r}
+suppressPackageStartupMessages({ library(Seurat); library(openxlsx) })
+
+obj_dir  <- "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/first_eval/objects"
+out_xlsx <- "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/first_eval/MS_metadata.xlsx"
+
+
+cat("marks:", paste(names(merged.ls), collapse = ", "), "\n")
+
+wb <- createWorkbook()
+for (mk in names(merged.ls)) {
+  md <- merged.ls[[mk]]@meta.data
+  df <- data.frame(cell = rownames(md), md, row.names = NULL,
+                   check.names = FALSE, stringsAsFactors = FALSE)
+  addWorksheet(wb, mk)
+  writeData(wb, mk, df)
+  cat(sprintf("  %-9s : %d cells x %d metadata columns\n", mk, nrow(df), ncol(df) - 1))
+}
+saveWorkbook(wb, out_xlsx, overwrite = TRUE)
+cat("Wrote:", out_xlsx, "\n")
+
+obj_dir  <- "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/first_eval/objects"
+out_xlsx <- "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/first_eval/MS_UMAP_coordinates_harmony.xlsx"
+
+
+cat("marks:", paste(names(merged.ls), collapse = ", "), "\n")
+
+wb <- createWorkbook()
+for (mk in names(merged.ls)) {
+  md <- merged.ls[[mk]]@reductions[["umap_harmony"]]@cell.embeddings
+  df <- data.frame(cell = rownames(md), md, row.names = NULL,
+                   check.names = FALSE, stringsAsFactors = FALSE)
+  addWorksheet(wb, mk)
+  writeData(wb, mk, df)
+  cat(sprintf("  %-9s : %d cells x %d metadata columns\n", mk, nrow(df), ncol(df) - 1))
+}
+saveWorkbook(wb, out_xlsx, overwrite = TRUE)
+cat("Wrote:", out_xlsx, "\n")
+
+obj_dir  <- "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/first_eval/objects"
+out_xlsx <- "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/first_eval/MS_UMAP_coordinates.xlsx"
+
+
+cat("marks:", paste(names(merged.ls), collapse = ", "), "\n")
+
+wb <- createWorkbook()
+for (mk in names(merged.ls)) {
+  md <- merged.ls[[mk]]@reductions[["umap"]]@cell.embeddings
+  df <- data.frame(cell = rownames(md), md, row.names = NULL,
+                   check.names = FALSE, stringsAsFactors = FALSE)
+  addWorksheet(wb, mk)
+  writeData(wb, mk, df)
+  cat(sprintf("  %-9s : %d cells x %d metadata columns\n", mk, nrow(df), ncol(df) - 1))
+}
+saveWorkbook(wb, out_xlsx, overwrite = TRUE)
+cat("Wrote:", out_xlsx, "\n")
+```
+
+Label transfer PBMCs with single cell ATAC
+
+
+```{r}
+
+suppressPackageStartupMessages({
+  library(data.table)
+  library(Signac)
+  library(Seurat)
+  library(GenomicRanges)
+  library(EnsDb.Hsapiens.v86)             # swap for the matching EnsDb if not hg38
+  library(BSgenome.Hsapiens.UCSC.hg38)    # swap for the matching BSgenome if not hg38 -- only used for chrom sizes to tile
+})
+
+set.seed(1)
+
+# ---- 1. user-editable paths ------------------------------------------------
+meta_path <- "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/Refs/GSE306525_cell_annotations.tsv"   # <- point at your actual TSV
+genome_build <- "hg38"
+
+# GEO series crosswalk (built once from GSE306525_series_matrix.txt's
+# Sample_geo_accession/_title/_supplementary_file_1 rows -- see
+# scripts/geo_sample_crosswalk.csv) and the local directory holding the
+# downloaded GEO fragment files.
+crosswalk_path <- "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/Refs/geo_sample_crosswalk.csv"
+fragments_dir  <- "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/Refs"
+
+# ---- 2. read + reshape metadata -------------------------------------------
+meta <- fread(meta_path)
+
+# Split "{Sample}#{barcode}" -> archr_sample / barcode (bare 10x barcode,
+# which is what has to match the fragments file's 4th column).
+meta[, c("archr_sample", "barcode") := tstrsplit(cellId_archr, "#", fixed = TRUE)]
+stopifnot(all(meta$archr_sample == meta$Sample))  # sanity check the split
+
+# Keep only cells ArchR already called as real cells.
+meta <- meta[PassQC == 1]
+
+# ArchR records whatever local file name was fed in as the `Sample` value
+# verbatim when the Arrow files were created, so the string doesn't
+# necessarily match the bare GEO donor code one-for-one -- your metadata's
+# samples carry the full original local filename including extension (e.g.
+# "ATAC_055_fragments.tsv.gz", confirmed by the earlier missing-file error,
+# which showed even "ATAC_EV08_fragments.tsv.gz" in that form). Normalize by
+# stripping a trailing "_fragments.<ext>.gz" / ".<ext>.gz" before comparing
+# against anything bare (HEALTHY_SAMPLES below, or geo_sample_crosswalk.csv's
+# `archr_sample_guess`), but keep working with the *raw*, un-stripped Sample
+# string everywhere else, since that's what the rest of the script indexes
+# with (sample_map[[s]], `s` coming straight from `unique(meta$archr_sample)`).
+strip_suffix <- function(x) sub("(_fragments)?\\.(tsv|bed)\\.gz$", "", x)
+
+# ---- 2a. restrict to only the samples you actually have fragments for ------
+# Your metadata spans the full GSE306525 series (C19 severity panel, flu
+# time-course, ...), but you only want the object built from the six C19
+# healthy-control (C19_ctrl) donors whose fragments.bed.gz you've downloaded.
+# Everything else is dropped here so the crosswalk/existence checks below
+# never even look at the samples you don't have.
+HEALTHY_SAMPLES <- c(
+  "ATAC_HIP02_frozen",
+  "ATAC_HIP023_frozen",
+  "ATAC_HIP043",
+  "ATAC_HIP044",
+  "ATAC_HIP045",
+  "ATAC_HIP15_frozen"
+)
+meta[, archr_sample_bare := strip_suffix(archr_sample)]
+missing_healthy <- setdiff(HEALTHY_SAMPLES, unique(meta$archr_sample_bare))
+if (length(missing_healthy) > 0) {
+  warning(
+    "HEALTHY_SAMPLES lists sample(s) not found in your metadata at all: ",
+    paste(missing_healthy, collapse = ", "),
+    " -- double-check the ArchR `Sample` spelling if you expected them."
+  )
+}
+meta <- meta[archr_sample_bare %in% HEALTHY_SAMPLES]
+if (nrow(meta) == 0) {
+  stop(
+    "No cells left after restricting to HEALTHY_SAMPLES. Every distinct ",
+    "`Sample` value actually present in your metadata (post-PassQC) is:\n  ",
+    paste(sort(unique(fread(meta_path)[PassQC == 1]$Sample)), collapse = "\n  "),
+    "\nUpdate HEALTHY_SAMPLES with the six that correspond to your healthy ",
+    "donors, using their exact spelling from this list (or its bare form, ",
+    "stripping any _fragments.<ext>.gz suffix)."
+  )
+}
+
+# ---- 2b. map each observed ArchR `Sample` value to its GEO fragments file --
+crosswalk <- fread(crosswalk_path)
+archr_samples <- unique(meta$archr_sample)
+hit <- match(strip_suffix(archr_samples), crosswalk$archr_sample_guess)
+sample_map <- setNames(
+  file.path(fragments_dir, crosswalk$fragment_filename[hit]),
+  archr_samples
+)
+sample_map <- sample_map[!is.na(hit)]  # unresolved entries are reported below, not silently NA-mapped
+
+missing_samples <- setdiff(archr_samples, names(sample_map))
+if (length(missing_samples) > 0) {
+  stop(
+    "No fragments file mapped for sample(s): ",
+    paste(missing_samples, collapse = ", "),
+    "\nThese don't match any `archr_sample_guess` in geo_sample_crosswalk.csv ",
+    "(after stripping a trailing _fragments.<ext>.gz) -- likely a HIV/",
+    "organophosphate/DU19 donor whose ArchR `Sample` naming wasn't confirmed; ",
+    "check its row in the crosswalk CSV and add/fix it there."
+  )
+}
+
+# Matching a Sample value to a crosswalk row doesn't guarantee the resulting
+# path actually exists on disk -- `fragments_dir` may be wrong, or the local
+# file may have been downloaded/renamed without the "GSMxxxxxxx_" prefix that
+# `fragment_filename` carries. Fail fast here with the full list of
+# unresolved paths rather than dying inside the per-sample loop below on
+# whichever file happens to come first.
+missing_files <- sample_map[!file.exists(sample_map)]
+if (length(missing_files) > 0) {
+  stop(
+    "sample_map resolves to fragments files that don't exist on disk:\n",
+    paste(sprintf("  %-25s -> %s", names(missing_files), missing_files), collapse = "\n"),
+    "\nCheck that `fragments_dir` (currently \"", fragments_dir, "\") is where the ",
+    "GEO fragment .bed.gz files actually live, and that they still carry the ",
+    "\"GSMxxxxxxx_\" prefix from geo_sample_crosswalk.csv's `fragment_filename` ",
+    "column -- if you renamed them on download, either rename them back or ",
+    "adjust `fragment_filename` in the crosswalk CSV to match."
+  )
+}
+
+# ---- 3. gene annotation (shared across all samples) ------------------------
+annotations <- GetGRangesFromEnsDb(ensdb = EnsDb.Hsapiens.v86)
+seqlevelsStyle(annotations) <- "UCSC"
+genome(annotations) <- genome_build
+
+# ---- 4. genome-wide 5kb bins as the feature space (matches this repo's own
+#         convention -- see `create_matrix_bins` / `5kb_bin_genome.sh`, which
+#         do `samtools idxstats` -> `bedtools makewindows -w 5000` -> `fragtk
+#         matrix -f fragments.tsv.gz -b windows.bed`). Signac's FeatureMatrix()
+#         takes any GRanges of features, so tiling the genome into 5kb bins
+#         and using that in place of a peak set is the direct equivalent --
+#         no macs2 call needed.
+BIN_WIDTH <- 5000
+
+chrom_sizes <- seqlengths(BSgenome.Hsapiens.UCSC.hg38)   # swap genome if not hg38
+bins <- tileGenome(
+  chrom_sizes,
+  tilewidth = BIN_WIDTH,
+  cut.last.tile.in.chrom = TRUE
+)
+bins <- keepStandardChromosomes(bins, pruning.mode = "coarse")
+seqlevelsStyle(bins) <- "UCSC"
+peaks <- bins   # kept the `peaks` name below so the rest of the script (FeatureMatrix, etc.) is unchanged
+
+# ---- 5. build one ChromatinAssay/Seurat object per ArchR sample -----------
+
+obj_list <- list()
+
+for (s in unique(meta$archr_sample)) {
+  meta_s <- meta[archr_sample == s]
+
+  # These GEO ArchR-exported fragment files keep the FULL "{Sample}#{barcode}"
+  # composite in column 4 (e.g. "ATAC_HIP045_fragments.tsv.gz#AAACGAA...-1"),
+  # NOT the bare 10x barcode -- and that composite is exactly cellId_archr.
+  # (Matching on meta_s$barcode fails with "Not all cells requested could be
+  # found in the fragment file".) cellId_archr already carries the sample
+  # prefix, so it is unique across samples and needs no post-hoc renaming.
+  cells_s <- meta_s$cellId_archr
+
+  frag_s <- CreateFragmentObject(
+    path  = sample_map[[s]],
+    cells = cells_s
+  )
+
+  counts_s <- FeatureMatrix(
+    fragments = frag_s,
+    features  = peaks,
+    cells     = cells_s
+  )
+
+  assay_s <- CreateChromatinAssay(
+    counts     = counts_s,
+    fragments  = frag_s,
+    annotation = annotations,
+    genome     = genome_build
+  )
+
+  seu_s <- CreateSeuratObject(counts = assay_s, assay = "ATAC")
+
+  # colnames(seu_s) are already cellId_archr (== fragment-file barcodes, unique
+  # across samples), so key the metadata on cellId_archr directly -- no
+  # RenameCells needed, and AddMetaData lines up unambiguously.
+  meta_s_df <- as.data.frame(meta_s)
+  rownames(meta_s_df) <- meta_s_df$cellId_archr
+  seu_s <- AddMetaData(seu_s, metadata = meta_s_df)
+
+  obj_list[[s]] <- seu_s
+}
+
+# ---- 6. merge all samples into one combined object -------------------------
+combined <- if (length(obj_list) == 1) {
+  obj_list[[1]]
+} else {
+  merge(obj_list[[1]], y = obj_list[-1])
+}
+
+# merge() does not carry Fragment objects over onto the combined assay, so
+# they must be re-attached. Pull them straight from the pre-merge per-sample
+# objects rather than rebuilding from scratch -- each Fragment's cell mapping
+# already uses cellId_archr (== the raw file barcode), so this preserves it.
+Fragments(combined) <- NULL
+for (s in names(obj_list)) {
+  Fragments(combined[["ATAC"]]) <- Fragments(obj_list[[s]])[[1]]
+}
+
+# ---- 7. carry over the ArchR UMAP + clustering as-is (no need to recompute) -
+umap_coords <- as.matrix(combined[[c("UMAP_1", "UMAP_2")]])
+colnames(umap_coords) <- paste0("archrUMAP_", seq_len(ncol(umap_coords)))  # DimReduc requires colnames == key + index
+combined[["archr_umap"]] <- CreateDimReducObject(
+  embeddings = umap_coords,
+  key        = "archrUMAP_",
+  assay      = "ATAC"
+)
+Idents(combined) <- combined$ClusterCellTypes
+
+saveRDS(combined, "combined_signac_obj.rds")
+message("Done: ", ncol(combined), " cells x ", nrow(combined), " 5kb bins -> combined_signac_obj.rds")
+
+```
+
+
+```{r umaps, fig.width=12, fig.height=6}
+nm  <- "ATAC Gündüz et al., 2025, BioarXiv"                       # pick any name from names(merged.ls)
+obj <- merged.ls[[nm]]
+
+p_clu <- DimPlot( merged.ls$`PBMC|ATAC`, reduction = "umap_harmony", label = TRUE, group.by = "predicted.id_ATLAS_ATAC") + NoLegend() + ggtitle(nm)
+p_smp <- DimPlot(merged.ls$`PBMC|H3K27me3`, reduction = "umap_harmony", group.by = "sample")  + ggtitle("sample")
+p_pat <- DimPlot(obj, reduction = "umap_harmony", group.by = "patient") + ggtitle("patient")
+ggarrange(p_clu, p_smp, p_pat, ncol = 3)
+
+p_smp
+```
+
+Gene activty from both 
+
+
+```{r}
+
+# get gene annotations from Ensembl
+annotations <- GetGRangesFromEnsDb(ensdb = genome_ann)
+
+# change to UCSC style since the data was mapped to mm10
+seqlevelsStyle(annotations) <- 'UCSC'
+
+# add the gene information to the object
+Annotation(merged.ls$`PBMC|ATAC`) <- annotations
+Annotation(combined) <- annotations
+
+```
+
+
+```{r gene_activity}
+
+# Calculate gene activities
+gene.activities <- GeneActivity(merged.ls$`PBMC|ATAC`)
+gene.activities <- GeneActivity(combined)
+# Add the gene activity matrix to the Seurat object as a new assay
+merged.ls$`PBMC|ATAC`[['RNA']] <- CreateAssayObject(counts = gene.activities)
+combined[['RNA']] <- CreateAssayObject(counts = gene.activities)
+# Set RNA as default assay
+DefaultAssay(merged.ls$`PBMC|ATAC`) <- 'RNA'
+DefaultAssay(combined) <- 'RNA'
+# normalize RNA data
+merged.ls$`PBMC|ATAC` <- NormalizeData(merged.ls$`PBMC|ATAC`) |>
+            FindVariableFeatures() |>
+            ScaleData()
+
+combined <- NormalizeData(combined) |>
+            FindVariableFeatures() |>
+            ScaleData()
+
+```
+
+label transfer with ATAC
+
+
+
+```{r}
+
+feats   <- intersect(VariableFeatures(merged.ls$`PBMC|ATAC`@assays$RNA), rownames(combined))
+ 
+  anchors <- FindTransferAnchors(reference = combined, query = merged.ls$`PBMC|ATAC`,
+               reference.assay = "RNA", query.assay = "RNA",
+               reduction = "cca", dims = 1:50, features = feats)
+
+merged.ls$`PBMC|ATAC`<- MapQuery(
+  anchorset =anchors, 
+  reference = combined,
+  query =   merged.ls$`PBMC|ATAC`,
+  refdata = "ClusterCellTypes")
+ 
+#rename predictions columns 
+cn <- colnames(merged.ls$`PBMC|ATAC`@meta.data)
+cn[cn == "predicted.id"] <- "predicted.id_ATLAS_ATAC"
+cn[cn == "predicted.id.score"] <- "predicted.id.score_ATLAS_ATAC"
+colnames(merged.ls$`PBMC|ATAC`@meta.data) <- cn
+
+#compacting cell annotation
+
+merged.ls$`PBMC|ATAC`@meta.data$BroadCellType <- case_when(
+  merged.ls$`PBMC|ATAC`@meta.data$predicted.id_ATLAS_ATAC %in% c("T_naive","T_mem_CD4","T_mem_CD8","T_mix") ~ "T_cell",
+  merged.ls$`PBMC|ATAC`@meta.data$predicted.id_ATLAS_ATAC %in% c("B_naive","B_mem") ~ "B_cell",
+  merged.ls$`PBMC|ATAC`@meta.data$predicted.id_ATLAS_ATAC %in% c("Plasma") ~ "Plasmacell",
+  merged.ls$`PBMC|ATAC`@meta.data$predicted.id_ATLAS_ATAC %in% c("NK_CD16") ~ "NK_cell",
+  merged.ls$`PBMC|ATAC`@meta.data$predicted.id_ATLAS_ATAC %in% c("Mono_CD14","Mono_CD16","Mono_other") ~ "Monocytes",
+   TRUE                                     ~ NA_character_
+)
+
+
+
+saveRDS(merged.ls,"/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/first_eval/objects/merged_PBMC.rds")
+```
+finally assign the final labels to all the cells that are shared between the 3 modalities
+
+```{r}
+
+cell_labels<-merged.ls$`PBMC|ATAC`@meta.data %>% dplyr::select(barcode,predicted.id_ATLAS_ATAC,predicted.id.score_ATLAS_ATAC)
+
+merged.ls$`PBMC|H3K27ac`@meta.data<- full_join(merged.ls$`PBMC|H3K27ac`@meta.data,cell_labels)
+
+cell_labels2<-merged.ls$`PBMC|H3K27ac`@meta.data %>% dplyr::select(barcode,predicted.id_ATLAS_ATAC,predicted.id.score_ATLAS_ATAC) %>% na.omit() %>% unique()
+
+merged.ls$`PBMC|H3K27me3`@meta.data<- full_join(merged.ls$`PBMC|H3K27me3`@meta.data,cell_labels2)
+
+# First step we have to extract all the barcodes that common across 4 modalities
+
+    x <- list(name_mod1=colnames(merged.ls$`PBMC|ATAC`),
+              name_mod2=colnames(merged.ls$`PBMC|H3K27ac`),
+              name_mod3=colnames(merged.ls$`PBMC|H3K27me3`))
+barcode_list<-Reduce(intersect, x)
+# Identify the cell barcodes that you want to keep
+combined.obj.ls_epi_mod<-list()
+modalities<-c("PBMC|ATAC","PBMC|H3K27ac","PBMC|H3K27me3")
+barcodes_to_keep <- barcode_list
+for (mod in modalities){
+# Use the subset function to filter the Seurat object
+merged.ls[[mod]] <- subset(combined.obj.ls[[paste0(mod)]], cells = barcodes_to_keep)
+
+# Print or further analyze your filtered Seurat object
+
+}
+
+
+saveRDS(merged.ls,"/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/first_eval/objects/merged_PBMC.rds")
+
+```
+WNN
+
+```{r}
+DefaultAssay(merged.ls$`PBMC|ATAC`) <- "bins"
+#first change colnames in the object 
+
+merged.ls$`PBMC|ATAC`@meta.data$barcode<-paste0(merged.ls$`PBMC|ATAC`@meta.data$sample,"_",merged.ls$`PBMC|ATAC`@meta.data$barcode)
+merged.ls$`PBMC|H3K27ac`@meta.data$barcode<-paste0(merged.ls$`PBMC|H3K27ac`@meta.data$sample,"_",merged.ls$`PBMC|H3K27ac`@meta.data$barcode)
+merged.ls$`PBMC|H3K27me3`@meta.data$barcode<-paste0(merged.ls$`PBMC|H3K27me3`@meta.data$sample,"_",merged.ls$`PBMC|H3K27me3`@meta.data$barcode)
+
+#change cell barcodes
+
+merged.ls$`PBMC|ATAC`<-RenameCells(merged.ls$`PBMC|ATAC`,new.names = merged.ls$`PBMC|ATAC`@meta.data$barcode)
+merged.ls$`PBMC|H3K27ac`<-RenameCells(merged.ls$`PBMC|H3K27ac`,new.names = merged.ls$`PBMC|H3K27ac`@meta.data$barcode)
+merged.ls$`PBMC|H3K27me3`<-RenameCells(merged.ls$`PBMC|H3K27me3`,new.names = merged.ls$`PBMC|H3K27me3`@meta.data$barcode)
+
+#change assay name 
+
+merged.ls$`PBMC|ATAC`<- RenameAssays(object = merged.ls$`PBMC|ATAC`, bins = "bins_ATAC")
+merged.ls$`PBMC|H3K27ac`<- RenameAssays(object = merged.ls$`PBMC|H3K27ac`, bins = "bins_H3K27ac")
+merged.ls$`PBMC|H3K27me3`<- RenameAssays(object = merged.ls$`PBMC|H3K27me3`, bins = "bins_H3K27me3")
+
+#extract assay and metadata and create a unique object
+
+meta_ATAC <- merged.ls$`PBMC|ATAC`@meta.data
+meta2_H3K27ac <- merged.ls$`PBMC|H3K27ac`@meta.data
+meta3_H3K27me3 <- merged.ls$`PBMC|H3K27me3`@meta.data
+
+# Add suffixes to avoid name clashes
+colnames(meta_ATAC) <- paste0(colnames(meta_ATAC), "_ATAC")
+colnames(meta2_H3K27ac) <- paste0(colnames(meta2_H3K27ac), "_H3K27ac")
+colnames(meta2_H3K27ac) <- paste0(colnames(meta2_H3K27ac), "_H3K27me3")
+
+meta_all <- cbind(meta_ATAC, meta2_H3K27ac[rownames(meta_ATAC), ], meta3_H3K27me3[rownames(meta_ATAC), ]) %>% na.omit()
+
+
+ATAC  <- merged.ls$`PBMC|ATAC`@assays$bins_ATAC
+keep <- intersect(Cells(ATAC), rownames(meta_all))
+length(keep)  
+ATAC<- subset(ATAC, cells = keep)
+H3K27ac <-  merged.ls$`PBMC|H3K27ac`@assays$bins_H3K27ac
+H3K27ac<-subset(H3K27ac, cells = keep)
+H3K27me3  <- merged.ls$`PBMC|H3K27me3`@assays$bins_H3K27me3
+H3K27me3<-subset(H3K27me3, cells = keep)
+
+
+PBMCs_nanoCTAR <- CreateSeuratObject(  counts    = ATAC,
+  assay     = "bins_ATAC",
+  meta.data = meta_all)
+
+PBMCs_nanoCTAR[["bins_H3K27ac"]]  <- H3K27ac
+PBMCs_nanoCTAR[["bins_H3K27me3"]]  <- H3K27me3
+
+DefaultAssay(MS_MultiOmics) <- "RNA"
+
+
+```
+
+rerun dimensionality reduction and clustering using the cells encompassing the 3 modalities
+
+```{r}
+marks <- c("ATAC", "H3K27ac", "H3K27me3")
+pc    <- 10
+
+for (mk in marks) {
+  assay <- paste0("bins_", mk)
+  lsi   <- paste0("lsi_",  mk)
+  snn   <- paste0(assay, "_snn")
+  message("=== ", assay, " ===")
+
+  DefaultAssay(PBMCs_nanoCTAR) <- assay
+
+  PBMCs_nanoCTAR <- RunTFIDF(PBMCs_nanoCTAR)
+  PBMCs_nanoCTAR <- FindTopFeatures(PBMCs_nanoCTAR, min.cutoff = 5)
+  PBMCs_nanoCTAR <- RunSVD(
+    PBMCs_nanoCTAR,
+    reduction.name = lsi,
+    reduction.key  = paste0("LSI", mk, "_")
+  )
+
+  PBMCs_nanoCTAR <- RunUMAP(
+    PBMCs_nanoCTAR,
+    reduction      = lsi,
+    dims           = 2:pc,
+    reduction.name = paste0("umap_", mk),
+    reduction.key  = paste0("UMAP", mk, "_")
+  )
+
+  PBMCs_nanoCTAR <- FindNeighbors(
+    PBMCs_nanoCTAR,
+    reduction  = lsi,
+    dims       = 2:pc,
+    graph.name = c(paste0(assay, "_nn"), snn)
+  )
+  PBMCs_nanoCTAR <- FindClusters(
+    PBMCs_nanoCTAR,
+    graph.name = snn,
+    algorithm  = 3,
+    resolution = 0.6,
+    verbose    = FALSE
+  )
+
+  # seurat_clusters is overwritten each pass -- keep a per-modality copy
+  PBMCs_nanoCTAR[[paste0("clusters_", mk)]] <- Idents(PBMCs_nanoCTAR)
+}
+```
+
+
+Harmony
+
+
+```{r}
+marks <- c("ATAC", "H3K27ac", "H3K27me3")
+pc    <- 10
+lsi_dims  <- 2:pc            # skip LSI_1 (depth-correlated)
+harm_dims <- 1:(pc - 1)      # Harmony returns length(lsi_dims) components
+
+stopifnot(length(unique(PBMCs_nanoCTAR$patient)) > 1)
+
+for (mk in marks) {
+  assay <- paste0("bins_", mk)
+  lsi   <- paste0("lsi_", mk)
+  harm  <- paste0("harmony_lsi_", mk)
+  snn   <- paste0(assay, "_snn")
+  hsnn  <- paste0(assay, "_harmony_snn")
+  message("=== ", assay, " ===")
+
+  DefaultAssay(PBMCs_nanoCTAR) <- assay
+
+  ## ---- Harmony-integrated ----
+  PBMCs_nanoCTAR <- RunHarmony(
+    PBMCs_nanoCTAR, group.by.vars = "patient",
+    reduction.use  = lsi,
+    dims.use       = lsi_dims,
+    reduction.save = harm,
+    project.dim    = FALSE
+  )
+  PBMCs_nanoCTAR <- RunUMAP(
+    PBMCs_nanoCTAR, reduction = harm, dims = harm_dims,
+    reduction.name = paste0("umap_harmony_", mk),
+    reduction.key  = paste0("UMAPh", mk, "_")
+  )
+  PBMCs_nanoCTAR <- FindNeighbors(
+    PBMCs_nanoCTAR, reduction = harm, dims = harm_dims,
+    graph.name = c(paste0(assay, "_harmony_nn"), hsnn)
+  )
+  PBMCs_nanoCTAR <- FindClusters(
+    PBMCs_nanoCTAR, graph.name = hsnn,
+    algorithm = 3, resolution = 0.6, verbose = FALSE
+  )
+  PBMCs_nanoCTAR[[paste0("harmony_clusters_", mk)]] <- Idents(PBMCs_nanoCTAR)
+}
+```
+
+
+WNN
+
+```{r}
+DefaultAssay(PBMCs_nanoCTAR) <- "bins_ATAC"
+
+PBMCs_nanoCTAR <- FindMultiModalNeighbors(
+ PBMCs_nanoCTAR,
+  reduction.list = list("lsi_ATAC", "lsi_H3K27ac", "lsi_H3K27me3"),
+  dims.list      = list(1:10,      1:10,          1:10),
+  modality.weight.name = "ATAC.weight"  # name for stored modality weights
+)
+
+PBMCs_nanoCTAR <- FindMultiModalNeighbors(
+ PBMCs_nanoCTAR,
+  reduction.list = list("harmony_lsi_ATAC", "harmony_lsi_H3K27ac", "harmony_lsi_H3K27me3"),
+  dims.list      = list(1:9,      1:9,          1:9),
+  modality.weight.name = "ATAC.weight",  # name for stored modality weights
+   knn.graph.name = "wknn_harmony",
+  snn.graph.name = "wsnn_harmony",
+  weighted.nn.name = "weighted.nn_harmony",
+)
+
+
+```
+
+Clustering and UMAP based on the WNN
+
+
+```{r}
+# Cluster on the WNN SNN graph
+PBMCs_nanoCTAR   <- FindClusters(
+  PBMCs_nanoCTAR,
+  graph.name = "wsnn",
+  algorithm = 3,        # Leiden
+  resolution = 0.5
+)
+
+# UMAP using WNN neighbors
+
+PBMCs_nanoCTAR  <-RunUMAP(PBMCs_nanoCTAR, nn.name = "weighted.nn", reduction.name = "wnn.umap", reduction.key = "wnnUMAP_")
+
+
+```
+
+```{r,fig.height=8, fig.width=14}
+
+library("randomcoloR")
+set.seed(1)
+cluster.cols <- distinctColorPalette(6) 
+
+
+p1<-DimPlot(PBMCs_nanoCTAR,reduction = "wnn.umap_harmony",group.by = "BroadCellType_ATAC",cols = cluster.cols)+
+  labs(x = "UMAP 1", y = "UMAP 2") +
+  ggtitle("WNN all modalities") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      size = 24,
+      face = "bold"
+    ),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    legend.text = element_text(size = 16),         # Legend labels
+    legend.title = element_text(size = 24),  # Legend title
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank()
+  )
+
+p2<-DimPlot(PBMCs_nanoCTAR,reduction = "wnn.umap",group.by = "BroadCellType_ATAC",cols = cluster.cols)+
+  labs(x = "UMAP 1", y = "UMAP 2") +
+  ggtitle("WNN all modalities") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      size = 24,
+      face = "bold"
+    ),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    legend.text = element_text(size = 16),         # Legend labels
+    legend.title = element_text(size = 24),  # Legend title
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank()
+  )
+
+
+p1
+p2
+```
+
+
+```{r}
+suppressPackageStartupMessages({ library(Seurat); library(openxlsx) })
+
+modality<-c("ATAC","H3K27ac","H3K27me3")
+
+obj_dir  <- "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/first_eval/objects"
+out_xlsx <- "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/first_eval/PBMCs_overlap_metadata.xlsx"
+
+  md <- PBMCs_nanoCTAR@meta.data
+  df <- data.frame(cell = rownames(md), md, row.names = NULL,
+                   check.names = FALSE, stringsAsFactors = FALSE)
+  addWorksheet(wb, mk)
+  writeData(wb, mk, df)
+  cat(sprintf("  %-9s : %d cells x %d metadata columns\n", mk, nrow(df), ncol(df) - 1))
+
+saveWorkbook(wb, out_xlsx, overwrite = TRUE)
+cat("Wrote:", out_xlsx, "\n")
+
+obj_dir  <- "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/first_eval/objects"
+out_xlsx <- "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/first_eval/PBMCs_UMAP_overlap_coordinates_harmony.xlsx"
+
+
+cat("marks:", paste(names(merged.ls), collapse = ", "), "\n")
+
+wb <- createWorkbook()
+for (mk in modality) {
+  md <- PBMCs_nanoCTAR@reductions[[paste0("umap_harmony_",mk)]]@cell.embeddings
+  df <- data.frame(cell = rownames(md), md, row.names = NULL,
+                   check.names = FALSE, stringsAsFactors = FALSE)
+  addWorksheet(wb, mk)
+  writeData(wb, mk, df)
+  cat(sprintf("  %-9s : %d cells x %d metadata columns\n", mk, nrow(df), ncol(df) - 1))
+}
+saveWorkbook(wb, out_xlsx, overwrite = TRUE)
+cat("Wrote:", out_xlsx, "\n")
+
+obj_dir  <- "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/first_eval/objects"
+out_xlsx <- "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/first_eval/PBMCs_overlap_UMAP_coordinates.xlsx"
+
+
+cat("marks:", paste(names(merged.ls), collapse = ", "), "\n")
+
+wb <- createWorkbook()
+for (mk in modality) {
+  md <- PBMCs_nanoCTAR@reductions[[paste0("umap_",mk)]]@cell.embeddings
+  df <- data.frame(cell = rownames(md), md, row.names = NULL,
+                   check.names = FALSE, stringsAsFactors = FALSE)
+  addWorksheet(wb, mk)
+  writeData(wb, mk, df)
+  cat(sprintf("  %-9s : %d cells x %d metadata columns\n", mk, nrow(df), ncol(df) - 1))
+}
+saveWorkbook(wb, out_xlsx, overwrite = TRUE)
+cat("Wrote:", out_xlsx, "\n")
+
+obj_dir  <- "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/first_eval/objects"
+out_xlsx <- "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/first_eval/PBMCs_overlap_WNN_coordinates.xlsx"
+
+
+cat("marks:", paste(names(merged.ls), collapse = ", "), "\n")
+
+wb <- createWorkbook()
+  md <- PBMCs_nanoCTAR@reductions[["wnn.umap"]]@cell.embeddings
+  df <- data.frame(cell = rownames(md), md, row.names = NULL,
+                   check.names = FALSE, stringsAsFactors = FALSE)
+  addWorksheet(wb,sheetName = "wnn")
+  writeData(wb,sheet = "wnn",df)
+  cat(sprintf("  %-9s : %d cells x %d metadata columns\n", mk, nrow(df), ncol(df) - 1))
+
+saveWorkbook(wb, out_xlsx, overwrite = TRUE)
+cat("Wrote:", out_xlsx, "\n")
+
+
+obj_dir  <- "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/first_eval/objects"
+out_xlsx <- "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/first_eval/PBMCs_overlap_WNN_harmony_coordinates.xlsx"
+
+
+cat("marks:", paste(names(merged.ls), collapse = ", "), "\n")
+
+wb <- createWorkbook()
+  md <- PBMCs_nanoCTAR@reductions[["wnn.umap_harmony"]]@cell.embeddings
+  df <- data.frame(cell = rownames(md), md, row.names = NULL,
+                   check.names = FALSE, stringsAsFactors = FALSE)
+  addWorksheet(wb,sheetName = "wnn")
+  writeData(wb,sheet = "wnn",df)
+  cat(sprintf("  %-9s : %d cells x %d metadata columns\n", mk, nrow(df), ncol(df) - 1))
+
+saveWorkbook(wb, out_xlsx, overwrite = TRUE)
+cat("Wrote:", out_xlsx, "\n")
+
+saveRDS(PBMCs_nanoCTAR,"/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/first_eval/objects/PBMC_multimodal.rds")
+```
+
+
+```{r session}
+sessionInfo()
+```

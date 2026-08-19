@@ -1,0 +1,675 @@
+---
+title: "First evaluation — multi-sample single-cell nano-CUT&Tag (epigenomic)"
+author: "Mattia Zaghi"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+    self_contained: true
+params:
+  wd: "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/"
+  experiment_source: "discover"   # "discover" (scan wd) or "config" (read config_path)
+  config_path: "/home/mattia/Multi_nanoCTRNA/config/config_human_MGI.yaml"
+  genome: "hg38"
+  binsize: 5000
+  filter_passed: true
+  qc_low: 0.01
+  qc_high: 0.99
+  dims: 30
+  resolution: 0.6
+  workers: 4                      # parallel workers (cores) for independent per-experiment work
+  group_pattern: "^(MS|PBMC)"     # samples are joined in one UMAP only within the same matched group
+  dataset_label: "this_run"       # label for the current dataset in QC-benchmark plots
+  reference_yaml: ""              # optional YAML of external .rds datasets to benchmark against (qc/QC.R style)
+  compute_tss: false              # compute TSS enrichment per experiment (heavy) + add to QC
+  save_rds: true                  # save the built Seurat objects (.rds) to the result folder
+  reuse_counts: true              # reuse cached 5kb count matrices instead of rebuilding them
+  fig_scale: 1.25                 # scale factor applied to every saved PNG (bigger so nothing is cut off)
+  include_rna: false              # analyse RNA experiments (mark == "RNA") if present
+  rna_dims: 15
+  rna_res: 0.8
+  rna_max_count: 25000
+  rna_min_count: 200
+  rna_max_mt: 5
+  fig_dir: "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/first_eval_figures"
+---
+
+```{r knitr-setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning = FALSE, message = FALSE,
+  dev = "png", dpi = 150, fig.align = "center"
+)
+```
+
+## Overview
+
+This is a **streamlined, sample/modality-agnostic first-evaluation** report. It
+covers the first five steps of the standard workflow — load → QC → merge →
+normalise/DR → cluster/UMAP — for a quick quality read across all samples at once.
+Annotation and label transfer are intentionally out of scope here.
+
+**Nothing is hardcoded to a particular dataset.** By default (`experiment_source =
+"discover"`) it scans the analysis folder `params$wd` and picks up *whatever*
+`{sample}/{modality}_{barcode}/` experiments are present — add or remove samples on
+disk and the report follows. Set `experiment_source = "config"` to instead read the
+experiment list from `params$config_path`. RNA experiments (base mark `RNA`) are
+analysed only when `include_rna = TRUE`; otherwise the report is epigenomic-only.
+
+Each figure is shown inline **and** written as a high-resolution PNG to
+`params$fig_dir`.
+
+```{r setup, results='hide'}
+# ---- libraries -------------------------------------------------------------
+suppressPackageStartupMessages({
+  library(Signac)
+  library(Seurat)
+  library(GenomicRanges)
+  library(stringr)
+  library(dplyr)
+  library(ggplot2)
+  library(ggpubr)
+  library(yaml)
+  library(ggVennDiagram)
+  library(ComplexUpset)
+  library(EnsDb.Hsapiens.v86)
+  library(BSgenome.Hsapiens.UCSC.hg38)
+})
+
+# ---- custom function libraries --------------------------------------------
+repodir <- "/home/mattia/Multi_nanoCTRNA/"
+source(file.path(repodir, "scripts", "functions_scCT.R"))      # plotCounts, DepthCorMulMod, plotConnectModal, ...
+source(file.path(repodir, "scripts", "functions_firstEval.R")) # config-driven first-eval helpers
+
+# ---- parallelism -----------------------------------------------------------
+# Independent per-experiment / per-group work is fanned across `params$workers`
+# cores. A fork-based (multicore) plan shares the loaded data copy-on-write;
+# Signac's own FeatureMatrix/GenomeBinMatrix futures nest as sequential inside.
+suppressPackageStartupMessages({ library(future); library(future.apply) })
+options(future.globals.maxSize = 128 * 1024^3)   # allow large Seurat objects across workers
+if (as.integer(params$workers) > 1 && .Platform$OS.type == "unix") {
+  future::plan(future::multicore, workers = as.integer(params$workers))
+} else {
+  future::plan(future::sequential)
+}
+cat("Parallel plan:", class(future::plan())[1], "| workers:", future::nbrOfWorkers(), "\n")
+
+# ---- genomic resources -----------------------------------------------------
+genome      <- params$genome
+genome_ann  <- EnsDb.Hsapiens.v86
+bs_genome   <- BSgenome.Hsapiens.UCSC.hg38
+
+# ---- high-resolution figure saver -----------------------------------------
+# every saved PNG is scaled up by params$fig_scale so nothing gets cut off.
+dir.create(params$fig_dir, recursive = TRUE, showWarnings = FALSE)
+fig_scale <- as.numeric(params$fig_scale)
+SP <- function(p, nm, w = 8, h = 6)
+  save_png(p, nm, params$fig_dir, w * fig_scale, h * fig_scale)
+```
+
+## 1. Experiment table (auto-detected)
+
+Experiments are discovered from the analysis folder (or read from the config when
+`experiment_source = "config"`) and expanded into one row per
+`sample × modality/barcode`. The **base mark** collapses replicate suffixes
+(`H3K27ac-1`, `H3K27ac_2` → `H3K27ac`) so replicates can be pooled for the merged
+view while remaining distinct experiments. RNA experiments (base mark `RNA`) are
+split off and only analysed when `params$include_rna` is `TRUE`.
+
+```{r experiment-table}
+exp_all <- build_experiment_table(
+  wd          = params$wd,
+  config_path = params$config_path,
+  source      = params$experiment_source
+)
+
+if (is.null(exp_all) || nrow(exp_all) == 0) {
+  stop("No experiments found (experiment_source='", params$experiment_source,
+       "', wd='", params$wd, "').\n",
+       "  wd must be the ANALYSIS ROOT that contains {sample}/{modality}_{barcode}/ dirs",
+       " -- not the first_eval/ output subfolder. Run snakemake from that root.")
+}
+
+sp      <- split_experiments(exp_all)
+exp_df  <- sp$epi            # epigenomic experiments -> bins path (used throughout)
+exp_rna <- sp$rna            # RNA experiments -> optional RNA section
+samples <- unique(exp_df$sample)
+marks   <- unique(exp_df$mark)
+
+knitr::kable(exp_all, caption = "All experiments detected (epigenomic + RNA).")
+cat("\nSource:", params$experiment_source,
+    "\nSamples:", paste(unique(exp_all$sample), collapse = ", "),
+    "\nEpigenomic marks:", paste(marks, collapse = ", "),
+    "\nRNA experiments:", nrow(exp_rna),
+    if (nrow(exp_rna) > 0 && !params$include_rna)
+      "  (present but skipped; set include_rna = TRUE to analyse)" else "",
+    "\n")
+```
+
+## 2. Load per-cell metadata
+
+Cell-calling metadata (`cell_picking/metadata.csv`) is loaded for every
+experiment. When `params$filter_passed` is `TRUE` (default) only cells flagged
+`passedMB` by the GMM cell caller are kept. Experiments whose metadata is not yet
+on disk are skipped with a warning, so the report can be run while preprocessing
+is still finishing.
+
+```{r load-metadata}
+meta.ls <- load_metadata_list(exp_df, params$wd, filter_passed = params$filter_passed)
+cat("Loaded metadata for", length(meta.ls), "of", nrow(exp_df), "experiments.\n")
+
+# UNFILTERED metadata (all barcodes, passed + dropped) for the cell-selection scatter
+meta_all.ls <- load_metadata_list(exp_df, params$wd, filter_passed = FALSE)
+cell_all_df <- qc_cell_table(meta_all.ls, group_pattern = params$group_pattern)
+groups      <- if (!is.null(cell_all_df)) unique(cell_all_df$group) else character(0)
+```
+
+The per-cell QC metric violins and the Excel summary are produced **after** the
+bin objects are built, so the fragments-per-cell metric is `nCount_bins` (see the
+"Per-cell QC metrics" section below).
+
+# Section A — Cross-sample QC comparison
+
+We compare the per-cell quality metrics across every experiment (sample × mark).
+All experiments were loaded into `meta.ls` (one metadata data-frame per `exp_id`),
+already restricted to passed cells when `params$filter_passed` is `TRUE`.
+Each figure is printed inline and written to `params$fig_dir` as a high-resolution PNG.
+
+## Passed cells per experiment
+
+```{r qc-ncells-barplot, fig.width=9, fig.height=5}
+p_ncells <- ncells_barplot(meta.ls)
+print(p_ncells)
+SP(p_ncells, "QC_ncells_per_experiment", w = 9, h = 5)
+```
+
+## Cell selection (passedMB)
+
+The GMM cell-caller decision per experiment: every barcode plotted as unique
+fragments (log10) vs FRiP, coloured by whether it was kept (`passedMB TRUE`) or
+dropped (`passedMB FALSE`) — the same scatter as the `pick_cells` output. Shown
+across all experiments and per sample-type group.
+
+```{r qc-cell-selection, fig.width=12, fig.height=9, results='asis'}
+p_sel <- tryCatch(plot_cell_selection(cell_all_df),
+                  error = function(e) { message("cell selection: ", conditionMessage(e)); NULL })
+if (!is.null(p_sel)) { print(p_sel); SP(p_sel, "QC_cell_selection", w = 12, h = 9) }
+
+for (g in groups) {
+  p <- tryCatch(plot_cell_selection(cell_all_df, group = g), error = function(e) NULL)
+  if (!is.null(p)) {
+    cat("\n\n### Cell selection —", g, "\n\n")
+    print(p); SP(p, paste0("QC_cell_selection_", g), w = 12, h = 9)
+  }
+}
+```
+
+## Cell overlap across marks within each sample
+
+For every sample we show how many cells are shared across that sample's marks.
+Samples with only one or two marks are handled gracefully (the call is wrapped
+in `tryCatch`, so a single degenerate sample never aborts the report).
+
+```{r qc-overlap-per-sample, fig.width=8, fig.height=6, results='asis'}
+for (s in samples) {
+  cat("\n\n### Overlap — sample:", s, "\n\n")
+  tryCatch({
+    p_ov <- overlap_plot(meta.ls, s)
+    print(p_ov)
+    SP(p_ov, paste0("QC_overlap_", s), w = 8, h = 6)
+  }, error = function(e) {
+    message("Overlap plot skipped for sample '", s, "': ", conditionMessage(e))
+  })
+}
+```
+
+# Build bin × cell objects
+
+For each experiment we build a 5 kb genome-bin × cell matrix from its fragments
+file and wrap it in a Seurat/Signac object (assay `bins`). This is the heaviest
+step; failures on individual experiments are caught so one bad experiment cannot
+abort the report.
+
+```{r build-objects, results='hide'}
+# reuse cached 5kb bin matrices (the expensive step) when available, so re-runs
+# only build experiments that are new / whose cells changed.
+counts_file  <- file.path(dirname(params$fig_dir), "objects",
+                          paste0("counts.ls_bins_", params$binsize, ".rds"))
+counts_cache <- if (isTRUE(params$reuse_counts) && file.exists(counts_file))
+                  readRDS(counts_file) else NULL
+
+obj.ls <- build_bins_objects(
+  exp_df, meta.ls, params$wd,
+  bs_genome    = bs_genome,
+  binsize      = params$binsize,
+  min_cell     = 1,
+  min_feat     = 1,
+  counts_cache = counts_cache
+)
+```
+
+```{r tss-enrich, eval=params$compute_tss, results='hide'}
+# TSS enrichment per experiment (heavy) -- augments each object with a
+# TSS.enrichment per-cell column so it flows into the QC metrics below and the
+# TSS meta-profile at the end.
+ids_o <- names(obj.ls)
+obj.ls <- .par_lapply(ids_o, function(id)
+  add_tss_enrichment(obj.ls[[id]], genome_ann, genome_name = params$genome))
+names(obj.ls) <- ids_o
+```
+
+```{r build-objects-summary}
+cat("Built", length(obj.ls), "Seurat objects.\n")
+data.frame(
+  experiment = names(obj.ls),
+  n_cells    = vapply(obj.ls, ncol, integer(1)),
+  n_bins     = vapply(obj.ls, nrow, integer(1)),
+  row.names  = NULL
+) |> knitr::kable(caption = "Bin × cell object dimensions per experiment.")
+```
+
+```{r save-objects, eval=params$save_rds}
+# persist the per-experiment objects + the QC table to the result folder so the
+# analysis can be resumed / reused without rebuilding the bin matrices.
+rds_dir <- file.path(dirname(params$fig_dir), "objects")   # first_eval/objects/
+dir.create(rds_dir, recursive = TRUE, showWarnings = FALSE)
+saveRDS(obj.ls,  file.path(rds_dir, "obj.ls_bins.rds"))
+
+# raw per-experiment 5kb bin count matrices (sparse) -- the expensive
+# GenomeBinMatrix output, saved separately so it can be reused to redo anything.
+counts_file <- file.path(rds_dir, paste0("counts.ls_bins_", params$binsize, ".rds"))
+saveRDS(extract_counts_list(obj.ls, assay = "bins"), counts_file)
+cat("Saved per-experiment objects to:", file.path(rds_dir, "obj.ls_bins.rds"),
+    "\n  + count matrices to:", counts_file, "\n")
+```
+
+# Per-cell QC metrics (from objects; fragments = `nCount_bins`)
+
+Built from the objects' metadata, so the fragments-per-cell metric is
+**`nCount_bins`** (bins-assay counts, as in `qc/QC.R`) — not the metadata
+`all_unique_MB`. Metrics: `logUMI`, `nCount_bins`, reads/cell, duplication rate,
+FRiP. Shown across all samples and per sample-type group, and exported to
+`QC_summary.xlsx`.
+
+```{r qc-cell-df}
+cell_df <- qc_cell_table(lapply(obj.ls, function(o) o@meta.data),
+                         group_pattern = params$group_pattern)
+if (isTRUE(params$save_rds) && !is.null(cell_df)) {
+  rds_dir <- file.path(dirname(params$fig_dir), "objects")
+  dir.create(rds_dir, recursive = TRUE, showWarnings = FALSE)
+  saveRDS(cell_df, file.path(rds_dir, "qc_cell_df.rds"))
+}
+```
+
+```{r qc-excel-export}
+if (is.null(cell_df) || nrow(cell_df) == 0) {
+  cat("No per-cell QC available -- skipping Excel.\n")
+} else {
+  qc_sum   <- qc_summary_table(cell_df)
+  xlsx_out <- file.path(dirname(params$fig_dir), "QC_summary.xlsx")   # first_eval/QC_summary.xlsx
+  write_qc_excel(qc_sum, xlsx_out)
+  cat("QC summary written to:", xlsx_out, "\n")
+  print(knitr::kable(qc_sum, caption = "Per-experiment QC averages (also in QC_summary.xlsx)."))
+}
+```
+
+```{r qc-metrics-combined, fig.width=10, fig.height=6, results='asis'}
+qc_specs <- list(
+  list(m = "logUMI",         lab = "log10 UMI",                        log = FALSE),
+  list(m = "nCount_bins",    lab = "unique fragments (5kb bins)",      log = TRUE),
+  list(m = "passed_filters", lab = "unique fragments (passed_filters)", log = TRUE),
+  list(m = "reads",          lab = "reads per cell",                   log = TRUE),
+  list(m = "dup_rate",       lab = "duplication rate",                 log = FALSE),
+  list(m = "FRiP",           lab = "FRiP (peak_ratio_MB)",             log = FALSE),
+  list(m = "TSS_enrichment", lab = "TSS enrichment",                   log = FALSE)
+)
+for (s in qc_specs) {
+  p <- tryCatch(qc_metric_violin(cell_df, s$m, ylab = s$lab, log_y = s$log),
+                error = function(e) { message(s$m, ": ", conditionMessage(e)); NULL })
+  if (!is.null(p)) { cat("\n\n##", s$lab, "\n\n"); print(p); SP(p, paste0("QC_", s$m), w = 10, h = 6) }
+}
+```
+
+```{r qc-metrics-by-group, fig.width=9, fig.height=5, results='asis'}
+for (g in groups) {
+  cat("\n\n## Per-group:", g, "\n\n")
+  for (s in qc_specs) {
+    p <- tryCatch(qc_metric_violin(cell_df, s$m, ylab = s$lab, log_y = s$log, group = g),
+                  error = function(e) NULL)
+    if (!is.null(p)) { print(p); SP(p, paste0("QC_", g, "_", s$m), w = 9, h = 5) }
+  }
+}
+```
+
+# Section A2 — QC benchmark (per-cell metrics, `qc/QC.R` style)
+
+The same per-cell QC panels as `qc/QC.R` — **reads/cell**, **fragments/cell**,
+**fragment/feature**, **FRiP**, and **duplication rate** — computed on the built
+bins objects (which carry both the metadata fields and `nCount_bins`/
+`nFeature_bins`). When `params$reference_yaml` points at a references file,
+external published datasets are loaded and shown alongside for **cross-technology
+comparison**, exactly like `QC.R` (see `config/qc_references_example.yaml`).
+
+```{r qc-benchmark-build}
+qc_bench <- qc_benchmark_table(
+  obj.ls, exp_df,
+  dataset_label  = params$dataset_label,
+  reference_yaml = if (nzchar(params$reference_yaml)) params$reference_yaml else NULL,
+  group_pattern  = params$group_pattern
+)
+cat("QC benchmark rows (cells):", nrow(qc_bench),
+    "\nDatasets compared:", paste(unique(qc_bench$dataset), collapse = ", "), "\n")
+```
+
+```{r qc-benchmark-panels, fig.width=12, fig.height=6, results='asis'}
+bench_specs <- list(
+  list(m = "reads",          lab = "Reads per cell",                   log = TRUE),
+  list(m = "fragments",      lab = "Fragments per cell (bins)",        log = TRUE),
+  list(m = "passed_filters", lab = "Unique fragments (passed_filters)", log = TRUE),
+  list(m = "frag_per_feat",  lab = "Fragment / feature",               log = FALSE),
+  list(m = "frip",           lab = "FRiP (peak_ratio_MB)",             log = FALSE),
+  list(m = "dup_rate",       lab = "Duplication rate per cell",        log = FALSE)
+)
+for (s in bench_specs) {
+  p <- tryCatch(qc_benchmark_violin(qc_bench, s$m, ylab = s$lab, log_y = s$log),
+                error = function(e) { message(s$m, ": ", conditionMessage(e)); NULL })
+  if (!is.null(p)) {
+    cat("\n\n###", s$lab, "\n\n"); print(p)
+    SP(p, paste0("QCbench_", s$m), w = 12, h = 6)
+  }
+}
+```
+
+### Object-based QC per sample-type group
+
+The same object-based panels (fragments/cell, fragment/feature, …) restricted to
+each group, comparing that group's samples on their own axes.
+
+```{r qc-benchmark-by-group, fig.width=9, fig.height=5, results='asis'}
+bench_groups <- setdiff(unique(qc_bench$group[qc_bench$dataset == params$dataset_label]), NA)
+for (g in bench_groups) {
+  cat("\n\n#### Group:", g, "\n\n")
+  for (s in bench_specs) {
+    p <- tryCatch(qc_benchmark_violin(qc_bench, s$m, ylab = s$lab, log_y = s$log, group = g),
+                  error = function(e) NULL)
+    if (!is.null(p)) { print(p); SP(p, paste0("QCbench_", g, "_", s$m), w = 9, h = 5) }
+  }
+}
+```
+
+## TSS enrichment (optional)
+
+Runs only when `params$compute_tss = TRUE` (it is heavy: it annotates each object
+from the EnsDb and scans fragments around TSSs).
+
+```{r qc-tss, eval=params$compute_tss, fig.width=12, fig.height=4, results='asis'}
+# TSS was already computed on obj.ls above; here we just draw the meta-profiles.
+for (id in names(obj.ls)) {
+  p <- tryCatch(Signac::TSSPlot(obj.ls[[id]]) + ggplot2::ggtitle(id),
+                error = function(e) { message("TSSPlot failed for ", id, ": ", conditionMessage(e)); NULL })
+  if (!is.null(p)) { cat("\n\n###", id, "\n\n"); print(p); SP(p, paste0("TSS_", id), w = 8, h = 4) }
+}
+```
+
+# Section B — Normalisation, dimensionality reduction, UMAP & clustering
+
+UMAPs are built two ways: **jointly per _sample type_ × mark** (samples are merged
+only within the same group — e.g. all MS H3K27ac together, all PBMC H3K27ac
+together — **never mixing types**, controlled by `params$group_pattern`), and
+**per individual experiment**. Bins objects are normalised with TF-IDF, top
+features selected, and an LSI (`RunSVD`) embedding computed. The first LSI
+component is almost always dominated by sequencing depth, so all downstream
+neighbour/UMAP steps start at LSI dimension 2 (`dims = 2:params$dims`).
+Independent group/experiment work is fanned across `params$workers` cores.
+
+## Merge by sample-type × mark, and normalise
+
+```{r b-merge-normalize}
+merged.ls <- merge_by_group_mark(obj.ls, exp_df, group_pattern = params$group_pattern)
+cat("Joint groups (type x mark):", paste(names(merged.ls), collapse = ", "), "\n")
+
+grp_names <- names(merged.ls)
+merged.ls <- .par_lapply(grp_names, function(nm) {
+  tryCatch(
+    normalize_dr(merged.ls[[nm]], min_cutoff = 5),
+    error = function(e) {
+      message("normalize_dr failed for '", nm, "': ", conditionMessage(e))
+      merged.ls[[nm]]
+    }
+  )
+})
+names(merged.ls) <- grp_names
+```
+
+## Depth correlation of LSI components
+
+`DepthCorMulMod()` shows the correlation between each LSI component and
+sequencing depth; the strong dim-1 correlation is the reason it is dropped.
+
+```{r b-depthcor, fig.width=12, fig.height=8}
+depth_plots <- lapply(names(merged.ls), function(nm) {
+  tryCatch(DepthCorMulMod(merged.ls[[nm]]),
+           error = function(e) NULL)
+})
+depth_plots <- Filter(Negate(is.null), depth_plots)
+if (length(depth_plots) > 0) {
+  p_depth <- ggpubr::ggarrange(plotlist = depth_plots,
+                               ncol = min(2, length(depth_plots)),
+                               nrow = ceiling(length(depth_plots) / 2))
+  print(p_depth)
+  SP(p_depth, "DR_depthcor_per_mark", w = 12, h = 8)
+}
+```
+
+## Elbow plots
+
+Standard-deviation explained per LSI dimension, used to sanity-check the number
+of dimensions retained.
+
+```{r b-elbow, fig.width=12, fig.height=8}
+elbow_plots <- lapply(names(merged.ls), function(nm) {
+  tryCatch({
+    obj  <- merged.ls[[nm]]
+    ndim <- min(50, ncol(obj[["lsi"]]))
+    ElbowPlot(obj, reduction = "lsi", ndims = ndim) +
+      ggplot2::ggtitle(nm) +
+      ggplot2::theme(plot.title = ggplot2::element_text(hjust = 0.5, face = "bold"))
+  }, error = function(e) NULL)
+})
+elbow_plots <- Filter(Negate(is.null), elbow_plots)
+if (length(elbow_plots) > 0) {
+  p_elbow <- ggpubr::ggarrange(plotlist = elbow_plots,
+                               ncol = min(2, length(elbow_plots)),
+                               nrow = ceiling(length(elbow_plots) / 2))
+  print(p_elbow)
+  SP(p_elbow, "DR_elbow_per_mark", w = 12, h = 8)
+}
+```
+
+## UMAP and clustering (joint per sample-type × mark)
+
+```{r b-umap-cluster}
+cur_names <- names(merged.ls)
+merged.ls <- .par_lapply(cur_names, function(nm) {
+  tryCatch(
+    run_umap_cluster(merged.ls[[nm]],
+                     dims = 2:params$dims,
+                     res  = params$resolution),
+    error = function(e) {
+      message("run_umap_cluster failed for '", nm, "': ", conditionMessage(e))
+      merged.ls[[nm]]
+    }
+  )
+})
+names(merged.ls) <- cur_names
+```
+
+```{r save-merged, eval=params$save_rds}
+rds_dir <- file.path(dirname(params$fig_dir), "objects")
+dir.create(rds_dir, recursive = TRUE, showWarnings = FALSE)
+
+# one .rds per sample-type group (MS, PBMC, PBMCs_nanoCTR, ...), each a named
+# list of that group's per-mark merged objects (names = mark).
+grp_of <- sub("\\|.*$", "", names(merged.ls))            # "MS|H3K27ac" -> "MS"
+saved <- character(0)
+for (g in unique(grp_of)) {
+  sub_ls <- merged.ls[grp_of == g]
+  names(sub_ls) <- sub("^[^|]*\\|", "", names(sub_ls))   # keep just the mark as the name
+  safe <- gsub("[^A-Za-z0-9]+", "_", g)
+  f <- file.path(rds_dir, paste0("merged_", safe, ".rds"))
+  saveRDS(sub_ls, f)
+  saved <- c(saved, basename(f))
+}
+saveRDS(merged.ls, file.path(rds_dir, "merged.ls_group_mark.rds"))  # combined, for convenience
+cat("Saved per-group merged objects:", paste(saved, collapse = ", "),
+    "\n  (+ combined merged.ls_group_mark.rds)\n")
+```
+
+For each sample-type × mark we show the clustering (left) next to the sample of
+origin (right); samples of the same type should mix within clusters.
+
+```{r b-dimplots, fig.width=12, fig.height=6, results='asis'}
+for (nm in names(merged.ls)) {
+  cat("\n\n###", nm, "\n\n")
+  tryCatch({
+    obj <- merged.ls[[nm]]
+    if (!"umap" %in% names(obj@reductions)) {
+      message("No UMAP for mark '", nm, "', skipping.")
+      next
+    }
+    p_clu <- DimPlot(obj, reduction = "umap", label = TRUE) +
+      NoLegend() + ggplot2::ggtitle(nm)
+    p_smp <- DimPlot(obj, reduction = "umap", group.by = "sample") +
+      ggplot2::ggtitle("sample")
+
+    nm_safe <- gsub("[^A-Za-z0-9]+", "_", nm)
+    print(p_clu)
+    print(p_smp)
+    SP(p_clu, paste0("UMAP_", nm_safe, "_clusters"), w = 7, h = 6)
+    SP(p_smp, paste0("UMAP_", nm_safe, "_bySample"), w = 7, h = 6)
+
+    # colour by patient when it adds information beyond sample (e.g. MS pools)
+    if ("patient" %in% colnames(obj@meta.data) &&
+        length(unique(obj$patient)) > 1 &&
+        !setequal(unique(obj$patient), unique(obj$sample))) {
+      p_pat <- DimPlot(obj, reduction = "umap", group.by = "patient") +
+        ggplot2::ggtitle("patient")
+      print(p_pat)
+      SP(p_pat, paste0("UMAP_", nm_safe, "_byPatient"), w = 7, h = 6)
+    }
+
+    p_both <- ggpubr::ggarrange(p_clu, p_smp, ncol = 2, nrow = 1)
+    print(p_both)
+    SP(p_both, paste0("UMAP_", nm_safe, "_clusters_and_sample"), w = 12, h = 6)
+  }, error = function(e) {
+    message("DimPlot failed for mark '", nm, "': ", conditionMessage(e))
+  })
+}
+```
+
+## Per-sample (single-experiment) UMAPs
+
+The same pipeline (`normalize_dr` → `run_umap_cluster`) is run on each
+individual experiment so per-sample structure can be inspected before merging.
+Experiments with fewer than 50 cells are skipped, and every per-object step is
+guarded so one bad experiment cannot abort the report. Results are arranged into
+one grid per mark.
+
+```{r b-per-experiment-umap, fig.width=12, fig.height=8, results='asis'}
+# Heavy compute (normalise + UMAP per experiment) fanned across cores; the
+# resulting DimPlots are collected and arranged serially below.
+per_exp <- .par_lapply(names(obj.ls), function(id) {
+  o <- obj.ls[[id]]
+  if (is.null(o) || ncol(o) < 50) return(NULL)
+  tryCatch({
+    o <- normalize_dr(o, min_cutoff = 5)
+    o <- run_umap_cluster(o, dims = 2:params$dims, res = params$resolution)
+    DimPlot(o, reduction = "umap", label = TRUE) + NoLegend() + ggplot2::ggtitle(id)
+  }, error = function(e) {
+    message("Per-experiment UMAP failed for '", id, "': ", conditionMessage(e)); NULL
+  })
+})
+names(per_exp) <- names(obj.ls)
+
+per_exp_umaps <- list()
+for (id in names(per_exp)) {
+  if (is.null(per_exp[[id]])) next
+  mk <- exp_df$mark[match(id, exp_df$exp_id)]
+  if (is.na(mk)) mk <- "unknown"
+  per_exp_umaps[[mk]] <- c(per_exp_umaps[[mk]], setNames(list(per_exp[[id]]), id))
+}
+
+for (mk in names(per_exp_umaps)) {
+  cat("\n\n### Per-sample UMAPs — mark:", mk, "\n\n")
+  plist <- per_exp_umaps[[mk]]
+  p_grid <- ggpubr::ggarrange(plotlist = plist,
+                              ncol = min(2, length(plist)),
+                              nrow = ceiling(length(plist) / 2))
+  print(p_grid)
+  SP(p_grid, paste0("UMAP_perSample_", mk), w = 12, h = 8)
+}
+```
+
+# Section C — RNA (optional)
+
+Run only when `params$include_rna` is `TRUE` **and** RNA experiments (base mark
+`RNA`) were detected. RNA is loaded from the cellranger GEX
+`filtered_feature_bc_matrix.h5`, QC-filtered on counts / mitochondrial content,
+then log-normalised, PCA-reduced, merged across samples, clustered and embedded
+with UMAP. When RNA is absent or `include_rna = FALSE`, these chunks do not run.
+
+```{r c-rna-load, eval=params$include_rna}
+have_rna <- nrow(exp_rna) > 0
+if (!have_rna)
+  message("include_rna = TRUE but no RNA experiments detected; skipping RNA section.")
+rna.obj.ls <- if (have_rna) load_rna_objects(exp_rna, params$wd) else list()
+cat("Loaded", length(rna.obj.ls), "RNA object(s).\n")
+```
+
+```{r c-rna-qc, eval=params$include_rna, fig.width=9, fig.height=5}
+if (length(rna.obj.ls) > 0) {
+  rna_meta.ls <- lapply(rna.obj.ls, function(o) o@meta.data)
+  for (feat in c("nCount_RNA", "nFeature_RNA", "percent.MT")) {
+    p <- tryCatch(qc_violin(rna_meta.ls, feat, ylab = feat,
+                            log_y = feat == "nCount_RNA"),
+                  error = function(e) NULL)
+    if (!is.null(p)) { print(p); SP(p, paste0("RNA_QC_", feat), w = 9, h = 5) }
+  }
+}
+```
+
+```{r c-rna-cluster, eval=params$include_rna, fig.width=12, fig.height=6, results='asis'}
+if (length(rna.obj.ls) > 0) {
+  # QC filter each experiment, then merge across samples and cluster/UMAP
+  rna.obj.ls <- lapply(rna.obj.ls, function(o)
+    tryCatch(qc_filter_rna(o, params$rna_max_count, params$rna_min_count,
+                           params$rna_max_mt),
+             error = function(e) o))
+  rna_merged <- tryCatch(merge_by_mark(rna.obj.ls, exp_rna),
+                         error = function(e) list())
+  for (nm in names(rna_merged)) {
+    obj <- tryCatch({
+      o <- normalize_rna(rna_merged[[nm]])
+      run_umap_cluster_rna(o, dims = 1:params$rna_dims, res = params$rna_res)
+    }, error = function(e) {
+      message("RNA DR/clustering failed for '", nm, "': ", conditionMessage(e)); NULL
+    })
+    if (is.null(obj)) next
+    cat("\n\n### RNA:", nm, "\n\n")
+    p_clu <- DimPlot(obj, reduction = "umap", label = TRUE) +
+      NoLegend() + ggplot2::ggtitle(nm)
+    p_smp <- DimPlot(obj, reduction = "umap", group.by = "sample") +
+      ggplot2::ggtitle("sample")
+    print(p_clu); print(p_smp)
+    SP(p_clu, paste0("RNA_UMAP_", nm, "_clusters"), w = 7, h = 6)
+    SP(p_smp, paste0("RNA_UMAP_", nm, "_bySample"), w = 7, h = 6)
+  }
+}
+```
+
+# Session information
+
+```{r session-info}
+cat("Figures written to:", params$fig_dir, "\n\n")
+sessionInfo()
+```

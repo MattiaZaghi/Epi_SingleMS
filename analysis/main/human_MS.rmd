@@ -1,0 +1,2158 @@
+---
+title: "MS_1"
+author: "Mattia Zaghi"
+date: "2025-10-22"
+output: html_document
+---
+
+## What is this tutorial for?
+
+This tutorial describes how to perform the downstream analysis on single-cell nano CUT&Tag data (2 biological replicates, 3 modalities), quantifying the fragment counts in genomic bins instead of peaks.
+
+This tutorial assumes that the data have already been preprocessed, including demultiplexing of the different modalities, running cellranger and custom cell calling (see [Set Up](https://github.com/bartosovic-lab/nanoscope#set-up) and [Preprocessing](https://github.com/bartosovic-lab/nanoscope#preprocessing)).\
+
+
+
+**Please note how in this tutorial we are describing how to perform the downstream analysis by using bins, not peaks.** For tutorial on peaks, see [here](https://fansalon.github.io/vignette_single-cell-nanoCT.html).\
+
+In addition, note how the biological data here analysed are 2 biological replicates of the same sample, thus it is safe to merge the two samples without any kind of integration. Often experiments are designed in order to have multiple samples and/or biological conditions requiring data integration, differential analysis, etc. These are not part of this vignette, but will be implemented in other vignettes in the future.\
+
+
+
+The downstream analysis implemented in this vignette is composed of 6 steps:\
+
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;**1.  Data loading (metadata and fragments)**\
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;**2.  Quality controls (QC)**\
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;**3.  Merge Seurat objects**\
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;**4.  Normalisation and dimensional reduction**\
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;**5.  Non-linear dimension reduction and clustering**\
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;**6.  Annotation**\
+\
+
+## Where/how can I get the input data?
+* If you are following [our tutorial](https://github.com/bartosovic-lab/nanoscope), your input data will probably already formatted in the proper way and stored in subdirectories of the  ```~/NatProt/nanoscope/``` folder\
+* If you have skipped the tutorial and just want to run this vignette, downloaded the toy data from [Zenodo](https://zenodo.org/record/7759368#.ZBrMcC-B3Eo)\
+* If you are running this vignette on your personal data, you will need to generate, for each sample and modality, the ```fragments.tsv.gz```, ```fragments.tsv.gz.tbi``` and ```metadata.csv``` files and store them in specific folders (see below section "1.1 Setting some initial variables")\
+\
+
+
+## 1. Data loading (metadata and fragments)
+In this section we are going to load the input files for each modality and sample, create a fragment object for each experiment, generate a bins x cell matrix for each experiment and finally generate one Seurat object for experiment.
+
+* Inputs of this section are the ```fragments.tsv.gz``` and ```metadata.csv``` files.\
+* Output of his section is a Seurat object for each experiment (6 in this case [2 samples * 3 modalities]).\
+
+First, load all the required libraries.
+
+```{r setup2}
+# ============================================================================
+# STEP 1: LOAD REQUIRED LIBRARIES
+# ============================================================================
+# Clear the workspace to ensure a clean environment
+rm(list = ls())
+
+# Core dependencies for single-cell chromatin analysis
+library(Signac)              # Single-cell ATAC analysis
+library(Seurat)              # Single-cell data analysis framework
+library(GenomicRanges)       # Genomic intervals and operations
+library(future)              # Parallel computing support
+library(stringr)             # String manipulation utilities
+
+# Visualization libraries
+library(ggplot2)             # Grammar of graphics plotting
+library(gghalves)            # Half-violin plot additions
+library(ggpubr)              # Publication-ready figures
+library(RColorBrewer)        # Color palettes
+library(randomcoloR)         # Generate distinct color palettes
+library(ggVennDiagram)       # Venn diagram visualizations
+library(ComplexUpset)        # UpSet plot generation
+
+# Genomic annotation and sequence data
+library(EnsDb.Hsapiens.v86)  # Ensembl gene annotations (human)
+library(BSgenome.Hsapiens.UCSC.hg38)  # Human genome sequence (hg38)
+library(regioneR)            # Genomic region analysis
+library(scales)              # Scale transformations for plotting
+
+# Data manipulation and I/O
+library(dplyr)               # Data frame operations
+library(readxl)              # Read Excel files
+library(openxlsx)            # Write Excel files
+```
+\
+
+### 1.1 Setting some initial variables
+# ============================================================================
+# 2. SET INITIAL VARIABLES AND CONFIGURATION
+# ============================================================================
+First, define some variables that will be used across the entire vignette. Modify them according to your data.\
+
+**Extremely important:**
+
+1. set as ```repodir``` the directory where the [nanoscope Github repo](https://github.com/bartosovic-lab/nanoscope/blob/main/README.md#clone-github-repository) is. This is required in order to upload all the custom functions needed to run this vignette\
+
+```{r init_var1 }
+# ============================================================================
+# STEP 2.1: CONFIGURE REPOSITORY AND CUSTOM FUNCTIONS
+# ============================================================================
+# Path to nanoscope repository containing custom analysis functions
+repodir <- "/home/mattia/Multi_nanoCTRNA/"  # User-configurable path
+
+# Source custom functions for single-cell CUT&Tag analysis
+source(paste0(repodir, "scripts/functions_scCT.R"))
+```
+
+
+2. set as ```wd``` the output root directory.\
+* If you are following [our tutorial](https://github.com/bartosovic-lab/nanoscope), please place the nanoscope output directories ```sample_P23209``` and ```sample_P24004``` in a directory called ```result``` and set it as working directory ```wd <- "~/NatProt/nanoscope/results/"```\
+* If you have skipped the tutorial and directly downloaded the toy data from [Zenodo](https://zenodo.org/record/7759368#.ZBrMcC-B3Eo), your ```wd``` will be ```/path/to/nanoscope_toy_data/results/```\
+* If you are running this vignette on your personal data please ensure that your ```wd``` is formatted as follow:\
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;- ```fragments.tsv.gz``` is expected to be in a folder with this path: ```wd/{sample_name}/{modality_barcode}/cellranger/outs/```\
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;- ```metadata.csv``` is expected to be in a folder with this path: ```wd/{sample_name}/{modality_barcode}/cell_picking/```\
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;-Note that this vignette assumes the same modalities to have the same barcodes across the different samples\
+
+**Please note that nothing but the directories containing the input data for each samples must be stored in ```wd```**
+```{r init_var2 }
+# ============================================================================
+# STEP 2.2: CONFIGURE OUTPUT PATHS AND WORKING DIRECTORY
+# ============================================================================
+require("knitr")
+
+# Set output directory for all downstream results and figures
+opts_knit$set(root.dir = "/date/gcb/gcb_MZ/nanoCTAR_YD/MS/")  # User-configurable output path
+
+# Alternative working directory setup (commented for current analysis)
+# wd <- "~/NatProt/nanoscope/results"  # User-configurable path
+# setwd(wd)
+```
+
+
+# STEP 2.3: DEFINE ANALYSIS PARAMETERS AND GENOMIC RESOURCES
+```{r init_var3 }
+# ============================================================================
+# Genome and annotation specifications
+genome <- "hg38"  # Human genome assembly version
+genome_ann <- EnsDb.Hsapiens.v86  # Ensembl database for gene annotations
+bs_genome <- BSgenome.Hsapiens.UCSC.hg38  # Genomic sequence reference
+
+# Assay specification
+assay <- "bins"  # Quantify fragments in genomic bins (not peaks)
+
+# Sample and modality definitions
+samples <- c("MS_1", "MS_2")  # Biological replicate identifiers
+modalities <- c("H3K4me3_CCTATCCT", "H3K27me3_ATAGAGGC", "RNA_AAAAGGGG")
+# Note: First two are epigenomic marks, third is RNA-seq
+
+# Feature filtering thresholds for Seurat object creation
+min_cell <- 1  # Minimum cells expressing a feature
+min_feat <- 1  # Minimum features per cell
+# ============================================================================
+# STEP 2.4: LOAD 10X BARCODE WHITELISTS AND CREATE MULTIOME MATCHING TABLE
+# ============================================================================
+# Load 10x Genomics chromatin-accessible barcodes
+Epi_barcode <- read.table(
+  "/home/mattia/Multi_nanoCTRNA/10x_barcodes/ATAC/737K-arc-v1.txt",
+  quote = "\"",
+  comment.char = ""
+) %>% dplyr::rename(barcode_epi = 1)  # Epigenomic barcode list
+
+# Load 10x Genomics RNA-seq barcodes
+RNA_barcode <- read.table(
+  "/home/mattia/Multi_nanoCTRNA/10x_barcodes/RNA/737K-arc-v1.txt",
+  quote = "\"",
+  comment.char = ""
+) %>% dplyr::rename(barcode_RNA = 1)  # RNA barcode list
+
+# Create a mapping table linking epigenomic and RNA barcodes
+# Each row represents a matched pair of barcodes from the 10x multiome platform
+Multiome_barcode_table <- bind_cols(Epi_barcode, RNA_barcode)
+
+# Append the sample suffix "-1" to match CellRanger output format
+Multiome_barcode_table$barcode_epi <- paste0(Multiome_barcode_table$barcode_epi, "-1")
+Multiome_barcode_table$barcode_RNA <- paste0(Multiome_barcode_table$barcode_RNA, "-1")
+```
+\
+
+
+### 1.2 Creating bin x cell matrix from a fragment file
+In order to create one Seurat object for each sample contaning a bin per cell count matrix we need to combine all the input files together. To this end we will need to: i) select the cells that passed internal filtering, ii) get the fragments file reporting the genomic coordinates of each fragment and the reads supporting each fragment and iii) construct a bin x cell matrix from a fragments file.\
+
+#### Load metadata files
+First, we parse the metadata file in order to get the cells that passed the filtering and are actually identified as cells.
+```{r load_metadata}
+# ============================================================================
+# STEP 3: LOAD METADATA FILES FOR QUALITY-FILTERED CELLS
+# ============================================================================
+# Define epigenomic modalities only (exclude RNA for now)
+modalities_epi <- modalities[-3]
+
+# Initialize list to store metadata dataframes
+metadata.ls <- list()
+
+# Iterate through samples and epigenomic modalities
+for (smpl in samples) {
+  cat("Loading metadata for sample", smpl, "\n")
+  for (mod in modalities_epi) {
+    cat("\t", mod, "\n")
+
+    # Load cell metadata containing quality metrics
+    metadata.ls[[paste0(mod, "_", smpl)]] <- read.csv(
+      paste0("/date/gcb/gcb_MZ/nanoCTAR_YD/MS/", smpl, "/", mod, "/cell_picking/metadata.csv"),
+      stringsAsFactors = FALSE
+    )
+    
+    # Set cell barcodes as rownames for easier subsetting
+    rownames(metadata.ls[[paste0(mod, "_", smpl)]]) <- 
+      metadata.ls[[paste0(mod, "_", smpl)]]$barcode
+    
+    # Add modality-specific quality filtering flags based on logUMI thresholds
+    metadata.ls[[paste0(mod, "_", smpl)]] <- 
+      metadata.ls[[paste0(mod, "_", smpl)]] %>% 
+      dplyr::mutate(passedMZ_H3K4me3_CCTATCCT = logUMI > 2.15)
+    
+    metadata.ls[[paste0(mod, "_", smpl)]] <- 
+      metadata.ls[[paste0(mod, "_", smpl)]] %>% 
+      dplyr::mutate(passedMZ_H3K27me3_ATAGAGGC = logUMI > 2.69)
+  }
+}
+```
+
+### Filtering-out low-quality cells
+Here we are going to exclude the cells which have not passed the internal filtering (flagged as ```passedMB```). This internal filtering takes into consideration the log10UMI and the percentage of reads in peaks for each cell and clusterizes the cells based on these values (by building a Gaussian finite mixture mode fitted via EM algorithm via ```Mclust```). This will cluster the cells in *n* clusters, but only the cells belonging to the top1 cluster with the highest log10UMI will be classified as ```passedMB=TRUE```.\
+
+Before doing this, however, we would like to know how many cells we are filtering out:
+```{r, fig.height=4.5, fig.width=4.5}
+# ============================================================================
+# STEP 4: VISUALIZE QC FILTERING RESULTS
+# ============================================================================
+# Generate visualization of cells passing quality thresholds
+plotPassed(metadata.ls, modalities = modalities, xaxis_text = 9, angle_x = 60)
+```
+
+And which cells we are filtering out:
+```{r, fig.height=7.5, fig.width=10}
+# Identify and visualize filtered-out cells
+plotPassedCells(metadata.ls, samples, modalities)
+```
+
+```{r, filter_out_cells}
+# ============================================================================
+# STEP 5: APPLY QUALITY THRESHOLDS TO FILTER CELLS
+# ============================================================================
+# Define epigenomic modalities list
+modalities <- c("H3K4me3_CCTATCCT", "H3K27me3_ATAGAGGC")
+
+# Store original list names for restoration
+original_names <- names(metadata.ls)
+
+# Filter each metadata dataframe by modality-specific quality cutoff
+metadata.ls <- lapply(names(metadata.ls), function(nm) {
+  # Extract modality identifier from element name
+  mod <- NULL
+  for (m in modalities) {
+    if (grepl(m, nm)) {
+      mod <- m
+      break
+    }
+  }
+  
+  # Define modality-specific cutoff column name
+  if (!is.null(mod)) {
+    cutoff_col <- paste0("passedMZ_", mod)
+  } else {
+    cutoff_col <- "passedMB"  # Fallback to generic column
+  }
+  
+  # Filter rows where quality flag is TRUE
+  if (cutoff_col %in% colnames(metadata.ls[[nm]])) {
+    return(metadata.ls[[nm]][metadata.ls[[nm]][[cutoff_col]], ])
+  } else {
+    warning(paste("Column", cutoff_col, "not found in", nm, "- using passedMB"))
+    return(metadata.ls[[nm]][metadata.ls[[nm]]$passedMB, ])
+  }
+})
+
+# Restore original names to maintain consistency
+names(metadata.ls) <- original_names
+```
+
+\
+
+
+#### Load fragments files and creation of fragment objects
+Then, we create a fragment object for each experiment (*i.e.*, an object holding all the information related to a single fragment file). To this end we will use the Signac function ```CreateFragmentObject```.\
+
+As explained in the [Signac vignette](https://stuartlab.org/signac/articles/merging.html), the ```CreateFragmentObject``` function checks that the file is present on disk, it is compressed and indexed, computes the MD5 sum for the file and the tabix index so that we can tell if the file is modified at any point, and checks that the expected cells (```metadata.csv```) are present in the file.
+
+```{r }
+
+# ============================================================================
+# STEP 6: CREATE FRAGMENT OBJECTS FROM CELLRANGER OUTPUT
+# ============================================================================
+# Initialize list to store Fragment objects
+fragment.ls <- list()
+
+# Iterate through samples and modalities to create Fragment objects
+for (smpl in samples) {
+  cat("Loading fragments for sample", smpl, "\n")
+  for (mod in modalities) {
+    cat("\t", mod, "\n")
+
+    # Create Fragment object from indexed fragment file
+    # This validates file integrity and verifies expected cells are present
+    fragment.ls[[paste0(mod, "_", smpl)]] <- CreateFragmentObject(
+      path = paste0("/date/gcb/gcb_MZ/nanoCTAR_YD/MS/", smpl, "/", mod, "/cellranger/outs/fragments_raw.tsv.gz"),
+      cells = metadata.ls[[paste0(mod, "_", smpl)]]$barcode
+    )
+  }
+}
+```
+```{r}
+# Inspect Fragment object structure for first modality and sample
+head(fragment.ls[[paste0("ATAC_TATAGCCT_", samples[1])]])
+```
+```{r}
+# Additional inspection (redundant - can be removed in cleanup)
+head(fragment.ls[[paste0("ATAC_TATAGCCT_", samples[1])]])
+```
+\
+
+#### Construct a bin x cell matrix from a fragments file
+Now that each experiment has been associated to a fragment object containing fragments and metadata, we can create a bins x cell matrix for each experiment. This will be done by using the Signac function GenomeBinMatrix.
+GenomeBinMatrix subdivides the genome in non-overlapping windows of length X (X=2kb here) and counts for each bin, for each cell, the number of overlapping fragments.
+
+To speed-up the process, we launch ```FeatureMatrix``` with ```process_n = 20000```. This runs OK on our 64GB MacBook Pro, but could go out-of-memory on other systems. If this happens, please, decrease the process_n  value (2000 should be fine for every system).
+
+
+```{r bin_x_cell}
+
+# Initialize list to store count matrices
+counts.ls <- list()
+
+# ============================================================================
+# STEP 7: CONSTRUCT BIN-BY-CELL COUNT MATRICES
+# ============================================================================
+# For each experiment, create a matrix counting fragments per genomic bin per cell
+
+for (experim in names(fragment.ls)) {
+  
+  cat("Processing experiment:", experim, "\n")
+  
+  # Extract modality name from experiment identifier
+  modal <- paste0(str_split_fixed(experim, "_", 4)[, 1], "_", str_split_fixed(experim, "_", 4)[, 2])
+  cat("\tGenerating bin matrix for modality:", modal, "\n")
+
+  # Create bin count matrix using genomic binning approach
+  # GenomeBinMatrix tiles the genome with non-overlapping windows and counts fragments per bin
+  counts.ls[[experim]] <- GenomeBinMatrix(
+    fragments = fragment.ls[[experim]],           # Fragment object
+    cells = metadata.ls[[experim]]$barcode,       # Quality-filtered cell barcodes
+    binsize = 5000,                               # 5kb non-overlapping bins
+    genome = seqlengths(bs_genome),               # Chromosome sizes
+    process_n = 2000000                           # Chunk size for parallel processing
+  )
+}
+
+# Display dimensions of first bin matrix
+counts.ls[[names(fragment.ls)[1]]][3990:4000, 1:50]
+```
+\
+
+
+### 1.3 Create one Seurat object for each experiment
+Now that we have generated a bins x cell matrix for each experiment, we can store it in a Seurat object along with the fragment object and the metadata.
+
+This is done for each experiment separately, objects will be merged in the next step. The reason for this is that we would like to first perform QC on each experiment individually and then merge all the experiments in a single Seurat object.
+```{r create_obj}
+
+obj.ls <- list()
+# ============================================================================
+# 8. CREATE SEURAT OBJECTS FOR EACH EXPERIMENT (EPIGENOMICS MODALITIES)
+# ============================================================================
+# Iterate among the experiment names in order to retrieve fragments and cell barcodes from the same experiment
+for (experim in names(counts.ls)) {
+
+  # Get sample and modality name from the experiment variable
+  smpl <- str_split_fixed(experim, "_", 3)[, 3]
+  modality <- str_split_fixed(experim, "_", 2)[, 1]
+
+  cat("Creating Seurat object for:", experim, "\n")
+
+  # Create chromatin assay from bin count matrix
+  chrom_bins.assay <- CreateChromatinAssay(
+    counts = counts.ls[[experim]],
+    fragments = fragment.ls[[experim]],
+    genome = genome,
+    min.cells = min_cell,
+    min.features = min_feat
+  )
+  
+  # Initialize Seurat object with chromatin assay
+  obj.ls[[experim]] <- CreateSeuratObject(
+    counts = chrom_bins.assay,
+    assay = paste0(modality, "_bins"),
+    meta.data = metadata.ls[[experim]],
+    project = smpl
+  )
+
+  # Add sample and experiment metadata
+  obj.ls[[experim]]$dataset <- experim
+  obj.ls[[experim]]$modality <- modality
+  obj.ls[[experim]]$sample <- smpl
+  
+  # Standardize barcode column naming
+  colnames(obj.ls[[experim]]@meta.data)[
+    colnames(obj.ls[[experim]]@meta.data) == "barcode"
+  ] <- "barcode_epi"
+  
+  # Map epigenomic barcodes to corresponding RNA barcodes using 10x whitelist
+  shared_barcode <- left_join(obj.ls[[experim]]@meta.data, Multiome_barcode_table)
+  obj.ls[[experim]]@meta.data$barcode_RNA <- shared_barcode$barcode_RNA
+  
+  # Rename cell identifiers to match RNA barcode convention
+  cat("Renaming cell barcodes for sample", smpl, "-", modality, "\n")
+  obj.ls[[experim]] <- RenameCells(
+    obj.ls[[experim]],
+    new.names = obj.ls[[experim]]@meta.data[["barcode_RNA"]]
+  )
+}
+
+
+```
+\
+
+### 1.3.2 Create one Counts RNA object for each experiment
+
+```{r}
+# ============================================================================
+# STEP 8: PREPARE FOR MULTI-OMICS DATA LOADING
+# ============================================================================
+# Transition from epigenomics-only preprocessing to integrated multi-omics workflow
+# At this point:
+# - Fragment objects and bin matrices created for H3K4me3 and H3K27me3
+# - Seurat objects initialized with epigenomics data
+# - Next: Load RNA data for integration with epigenomics modalities
+
+cat("=== PHASE 2: MULTI-OMICS INTEGRATION ===\n")
+cat("Loading RNA modality for multi-omics analysis...\n")
+```
+
+```{r}
+# ============================================================================
+# STEP 9: LOAD AND PREPARE RNA COUNT MATRICES
+# ============================================================================
+# Load 10x Feature-BC matrix (RNA counts) for each sample
+
+counts_RNA.ls <- list()
+samples_RNA <- samples
+modality_RNA <- modalities[3]  # RNA modality is the third in our list
+
+for (smpl in samples_RNA) {
+  for (mod in modality_RNA) {
+    cat("Loading RNA counts for sample", smpl, "\n")
+
+    # Load 10x format HDF5 matrix
+    counts_RNA.ls[[paste0(mod, "_", smpl)]] <- Read10X_h5(
+      paste0("/date/gcb/gcb_MZ/nanoCTAR_YD/MS/", smpl, "/RNA_AAAAGGGG/cellranger/outs/filtered_feature_bc_matrix.h5")
+    )
+  }
+}
+```
+
+## 2. Quality controls (QC) **OPTIONAL**
+Before merging the objects, we are going to do some QC on the individual experiments. In particular, we are going to drop cells with abnormal number of UMIs. To define what is "abnormal" and what is not, we will use quantiles. Everything greater than the 95th or less than the 5th quantiles will be here considered as "abnormal" and therefore discarded.
+
+**Please, consider how applying these filters is optional and the thresholds used should be specifically set for each dataset as they usually are highly sample-specific. The thresholds we are applying here are quite harsh and, if applied to other datasets, might lead to removal of important biological information.**
+
+* Input of this section is a Seurat object for each experiment (6 in this case [2 samples * 3 modalities]).\
+* Output of this section is a Seurat object for each experiment (6 in this case [2 samples * 3 modalities]) containing cells which have passed QCs.
+
+```{r qc_filtering}
+# ============================================================================
+# STEP 10: QUALITY CONTROL FILTERING - EPIGENOMICS MODALITIES
+# ============================================================================
+# Filter low-quality cells using logUMI quantiles as threshold
+# Cells with extreme UMI counts are removed to eliminate technical artifacts
+
+obj.ls.qc <- list()
+quant_high <- 0.99  # Upper quantile threshold
+quant_low <- 0.01   # Lower quantile threshold
+
+for (experiment in names(obj.ls)) {
+
+  # Calculate quantile-based thresholds for logUMI
+  logUMI_cutoff_high <- quantile(obj.ls[[experiment]]$logUMI, quant_high)
+  logUMI_cutoff_low <- quantile(obj.ls[[experiment]]$logUMI, quant_low)
+
+  # Subset cells within quantile range
+  obj.ls.qc[[experiment]] <- subset(
+    obj.ls[[experiment]],
+    logUMI > logUMI_cutoff_low & logUMI < logUMI_cutoff_high
+  )
+
+  # Report filtering statistics
+  old_n_cell <- nrow(obj.ls[[experiment]][[]])
+  new_n_cell <- nrow(obj.ls.qc[[experiment]][[]])
+  discarded <- old_n_cell - new_n_cell
+  
+  cat(experiment, "\n")
+  cat("\tDiscarded", discarded, "cells (", round(discarded / old_n_cell * 100, 2), "%)\n")
+}
+```
+```{r}
+plotCounts(obj = obj.ls.qc, quantiles = c(quant_low, quant_high), feature = "logUMI")
+
+# Clean up original object list to free memory
+rm(obj.ls)
+````
+\
+
+
+Now we will create an RNA object list list and perform some QC before unifying all the objects
+```{r create_obj}
+obj.ls_RNA <- list()
+
+# ============================================================================
+# STEP 11: CREATE SEURAT OBJECTS FROM RNA COUNT MATRICES
+# ============================================================================
+# Initialize Seurat objects for each RNA experiment
+
+for (experim in names(counts_RNA.ls)) {
+  
+  # Extract sample and modality
+  smpl <- str_split_fixed(experim, "_", 3)[, 3]
+  modality <- str_split_fixed(experim, "_", 2)[, 1]
+
+  # Create Seurat object from RNA counts
+  obj.ls_RNA[[paste0(experim)]] <- CreateSeuratObject(
+    counts = counts_RNA.ls[[paste0(experim)]],
+    assay = "RNA",
+    project = smpl,
+    min.cells = 0,
+    min.features = 0
+  )
+
+  # Add metadata
+  obj.ls_RNA[[paste0(experim)]]@meta.data$barcode_RNA <- colnames(obj.ls_RNA[[paste0(experim)]])
+  
+  # Calculate percentage of mitochondrial genes
+  obj.ls_RNA[[paste0(experim)]][["percent.MT"]] <- PercentageFeatureSet(
+    obj.ls_RNA[[paste0(experim)]],
+    pattern = "^MT-"
+  )
+  
+  # Add experiment metadata
+  obj.ls_RNA[[paste0(experim)]]$dataset <- experim
+  obj.ls_RNA[[paste0(experim)]]$modality <- modality
+  obj.ls_RNA[[paste0(experim)]]$sample <- smpl
+}
+```
+Now we will perform the usual RNA qc to select only quality cells and then move to perform the log transformation before unifying all the objects
+
+```{r,fig.height=8, fig.width=8}
+# ============================================================================
+# STEP 12: RNA QUALITY CONTROL - BEFORE FILTERING
+# ============================================================================
+# Visualize quality metrics before applying filters
+
+# Aggregate metadata from all RNA objects
+QC_RNA <- do.call(rbind, lapply(names(obj.ls_RNA), function(x) {
+  # Extract relevant QC columns
+  df <- obj.ls_RNA[[x]]@meta.data[, c("orig.ident", "nFeature_RNA", "nCount_RNA", "percent.MT")]
+  
+  # Standardize column names
+  colnames(df) <- c("sample", "Genes", "RNA", "MT")
+  
+  # Update sample name to match list identifier
+  df$sample <- x
+  return(df)
+}))
+
+QC_RNA$sample <- as.factor(QC_RNA$sample)
+
+# Helper function to annotate plots with statistical summaries
+add_mean_median_annotation <- function(plot, data, x_var, y_var) {
+  samples <- unique(data[[x_var]])
+  for (sample in samples) {
+    sample_data <- data[data[[x_var]] == sample, ]
+    mean_value <- mean(sample_data[[y_var]], na.rm = TRUE)
+    median_value <- median(sample_data[[y_var]], na.rm = TRUE)
+    
+    plot <- plot + 
+      annotate("text", x = sample, y = max(sample_data[[y_var]], na.rm = TRUE) * 1.05, 
+               label = paste("Mean:", round(mean_value, 2)), color = "blue", size = 5, fontface = "bold") +
+      annotate("text", x = sample, y = max(sample_data[[y_var]], na.rm = TRUE) * 1.50, 
+               label = paste("Median:", round(median_value, 2)), color = "red", size = 5, fontface = "bold")
+  }
+  return(plot)
+}
+
+# Plot for RNA
+Transcripts <- ggplot(QC_RNA) +
+  aes(x = sample, y = log(RNA), fill = sample, color = sample) +
+  geom_violin(trim = TRUE, color = "#000000") +
+  geom_boxplot(width = 0.1, color = "#000000", fill = "#ffffff", outlier.shape = NA) +
+  scale_fill_manual(values = c("#555F6A", "#FF0099"))+
+  scale_color_manual(values = c("#555F6A", "#FF0099"))+
+  ggthemes::theme_base() +
+  xlab("") +
+  ylab("Log(UMI) per cell") +
+  theme(panel.border = element_rect()) +
+  theme_classic() + theme(legend.position = "none") +
+  theme(axis.text.x = element_text(size = 18, family = "Arial", angle = 45, hjust = 1),
+        axis.text.y = element_text(size = 18, family = "Arial"),
+        axis.title.y = element_text(size = 18, family = "Arial"),
+        axis.line = element_line(size = 1))
+
+Transcripts <- add_mean_median_annotation(Transcripts, QC_RNA, "sample", "RNA")
+
+# Plot for Genes
+Genes <- ggplot(QC_RNA) +
+  aes(x = sample, y = Genes, fill = sample, color = sample) +
+  geom_violin(trim = TRUE, color = "#000000") +
+  geom_boxplot(width = 0.1, color = "#000000", fill = "#ffffff", outlier.shape = NA) +
+  scale_fill_manual(values = c("#555F6A", "#FF0099"))+
+  scale_color_manual(values = c("#555F6A", "#FF0099"))+
+  ggthemes::theme_base() +
+  xlab("") +
+  ylab("Number of Genes per cell") +
+  theme(panel.border = element_rect()) +
+  theme_classic() + theme(legend.position = "none") +
+  theme(axis.text.x = element_text(size = 18, family = "Arial", angle = 45, hjust = 1),
+        axis.text.y = element_text(size = 18, family = "Arial"),
+        axis.title.y = element_text(size = 18, family = "Arial"),
+        axis.line = element_line(size = 1))
+
+Genes <- add_mean_median_annotation(Genes, QC_RNA, "sample", "Genes")
+
+# Plot for Mt
+MT <- ggplot(QC_RNA) +
+  aes(x = sample, y =   MT, fill = sample, color = sample) +
+  geom_violin(trim = TRUE, color = "#000000") +
+  geom_boxplot(width = 0.1, color = "#000000", fill = "#ffffff", outlier.shape = NA) +
+  scale_fill_manual(values = c("#555F6A", "#FF0099"))+
+  scale_color_manual(values = c("#555F6A", "#FF0099"))+
+  ggthemes::theme_base() +
+  xlab("") +
+  ylab("Percentage of Mt genes") +
+  theme(panel.border = element_rect()) +
+  theme_classic() + theme(legend.position = "none") +
+  theme(axis.text.x = element_text(size = 18, family = "Arial", angle = 45, hjust = 1),
+        axis.text.y = element_text(size = 18, family = "Arial"),
+        axis.title.y = element_text(size = 18, family = "Arial"),
+        axis.line = element_line(size = 1))
+
+MT <- add_mean_median_annotation(MT, QC_RNA, "sample", "MT")
+
+Transcripts
+Genes
+MT
+```
+```{r}
+# FeatureScatter is typically used to visualize feature-feature relationships,
+
+plot1 <- FeatureScatter(obj.ls_RNA$RNA_AAAAGGGG_MS_1, feature1 = "nCount_RNA", feature2 = "percent.MT")+
+    xlab("UMI") +
+    ylab("Percentage of Mt genes") #UMI vs mito percentage
+plot2 <- FeatureScatter(obj.ls_RNA$RNA_AAAAGGGG_MS_1, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") +xlab("UMI") +
+    ylab("N° of genes")  #UMI vs genes
+plot3 <- FeatureScatter(obj.ls_RNA$RNA_AAAAGGGG_MS_2, feature1 = "nCount_RNA", feature2 = "percent.MT")+
+    xlab("UMI") +
+    ylab("Percentage of Mt genes") #UMI vs mito percentage
+plot4 <- FeatureScatter(obj.ls_RNA$RNA_AAAAGGGG_MS_2, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")+xlab("UMI") +
+    ylab("N° of genes")  #UMI vs genes
+plot1 
+plot2
+plot3 
+plot4
+
+```
+
+# ============================================================================
+# 13. FILTER LOW QUALITY RNA CELLS
+# ============================================================================
+
+```{r}
+# ============================================================================
+# STEP 13: APPLY QUALITY FILTERING TO RNA DATA
+# ============================================================================
+# Filter RNA cells based on common quality thresholds
+
+obj.ls_RNA_QC <- list()
+
+for (experim in names(obj.ls_RNA)) {
+  # Verify that cells meet quality criteria before subsetting
+  cells_pass <- sum(
+    obj.ls_RNA[[experim]]$nCount_RNA < 25000 &
+    obj.ls_RNA[[experim]]$nCount_RNA > 200 &
+    obj.ls_RNA[[experim]]$percent.MT < 5
+  )
+  
+  if (cells_pass > 0) {
+    # Subset cells meeting quality thresholds
+    obj.ls_RNA_QC[[experim]] <- subset(
+      x = obj.ls_RNA[[experim]],
+      subset = nCount_RNA < 25000 & nCount_RNA > 200 & percent.MT < 5
+    )
+    
+    # Report filtering statistics
+    old_n_cell <- nrow(obj.ls_RNA[[experim]][[]])
+    new_n_cell <- nrow(obj.ls_RNA_QC[[experim]][[]])
+    discarded <- old_n_cell - new_n_cell
+    
+    cat(experim, "\n")
+    cat("\tDiscarded", discarded, "cells (", round(discarded / old_n_cell * 100, 2), "%)\n")
+  } else {
+    # Handle case where no cells pass threshold
+    obj.ls_RNA_QC[[experim]] <- data.frame()
+    cat(experim, "\n")
+    cat("\tNo cells passed quality thresholds.\n")
+  }
+}
+
+```
+Now we will perform the usual RNA qc tests after filtering to check the final dataset
+
+```{r,fig.height=8, fig.width=8}
+# ============================================================================
+# 14. RNA QC PLOTS - AFTER FILTERING
+# ============================================================================
+# Aggregate metadata from all Seurat objects in the list
+QC_RNA <- do.call(rbind, lapply(names(obj.ls_RNA_QC), function(x) {
+  # Extract relevant columns from each object
+  df <- obj.ls_RNA_QC[[x]]@meta.data[, c("orig.ident", "nFeature_RNA", "nCount_RNA", "percent.MT")]
+  
+  # Standardize column names for your plotting script
+  colnames(df) <- c("sample", "Genes", "RNA", "MT")
+  
+  # Ensure the sample name is consistent with the list name if orig.ident is not unique
+  df$sample <- x 
+  return(df)
+}))
+
+QC_RNA$sample <- as.factor(QC_RNA$sample)
+
+# Function to add mean and median annotations for each sample above the violin plots
+add_mean_median_annotation <- function(plot, data, x_var, y_var) {
+  samples <- unique(data[[x_var]])
+  for (sample in samples) {
+    sample_data <- data[data[[x_var]] == sample, ]
+    mean_value <- mean(sample_data[[y_var]], na.rm = TRUE)
+    median_value <- median(sample_data[[y_var]], na.rm = TRUE)
+    plot <- plot + 
+      annotate("text", x = sample, y = max(sample_data[[y_var]], na.rm = TRUE) * 1.05, 
+               label = paste("Mean:", round(mean_value, 2)), color = "blue", size = 5, fontface = "bold") +
+      annotate("text", x = sample, y = max(sample_data[[y_var]], na.rm = TRUE) * 1.50, 
+               label = paste("Median:", round(median_value, 2)), color = "red", size = 5, fontface = "bold")
+  }
+  return(plot)
+}
+
+# Plot for RNA
+Transcripts <- ggplot(QC_RNA) +
+  aes(x = sample, y = log(RNA), fill = sample, color = sample) +
+  geom_violin(trim = TRUE, color = "#000000") +
+  geom_boxplot(width = 0.1, color = "#000000", fill = "#ffffff", outlier.shape = NA) +
+  scale_fill_manual(values = c("#555F6A", "#FF0099"))+
+  scale_color_manual(values = c("#555F6A", "#FF0099"))+
+  ggthemes::theme_base() +
+  xlab("") +
+  ylab("Log(UMI) per cell") +
+  theme(panel.border = element_rect()) +
+  theme_classic() + theme(legend.position = "none") +
+  theme(axis.text.x = element_text(size = 18, family = "Arial", angle = 45, hjust = 1),
+        axis.text.y = element_text(size = 18, family = "Arial"),
+        axis.title.y = element_text(size = 18, family = "Arial"),
+        axis.line = element_line(size = 1))
+
+Transcripts <- add_mean_median_annotation(Transcripts, QC_RNA, "sample", "RNA")
+
+# Plot for Genes
+Genes <- ggplot(QC_RNA) +
+  aes(x = sample, y = Genes, fill = sample, color = sample) +
+  geom_violin(trim = TRUE, color = "#000000") +
+  geom_boxplot(width = 0.1, color = "#000000", fill = "#ffffff", outlier.shape = NA) +
+  scale_fill_manual(values = c("#555F6A", "#FF0099"))+
+  scale_color_manual(values = c("#555F6A", "#FF0099"))+
+  ggthemes::theme_base() +
+  xlab("") +
+  ylab("Number of Genes per cell") +
+  theme(panel.border = element_rect()) +
+  theme_classic() + theme(legend.position = "none") +
+  theme(axis.text.x = element_text(size = 18, family = "Arial", angle = 45, hjust = 1),
+        axis.text.y = element_text(size = 18, family = "Arial"),
+        axis.title.y = element_text(size = 18, family = "Arial"),
+        axis.line = element_line(size = 1))
+
+Genes <- add_mean_median_annotation(Genes, QC_RNA, "sample", "Genes")
+
+# Plot for Mt
+MT <- ggplot(QC_RNA) +
+  aes(x = sample, y =   MT, fill = sample, color = sample) +
+  geom_violin(trim = TRUE, color = "#000000") +
+  geom_boxplot(width = 0.1, color = "#000000", fill = "#ffffff", outlier.shape = NA) +
+  scale_fill_manual(values = c("#555F6A", "#FF0099"))+
+  scale_color_manual(values = c("#555F6A", "#FF0099"))+
+  ggthemes::theme_base() +
+  xlab("") +
+  ylab("Percentage of Mt genes") +
+  theme(panel.border = element_rect()) +
+  theme_classic() + theme(legend.position = "none") +
+  theme(axis.text.x = element_text(size = 18, family = "Arial", angle = 45, hjust = 1),
+        axis.text.y = element_text(size = 18, family = "Arial"),
+        axis.title.y = element_text(size = 18, family = "Arial"),
+        axis.line = element_line(size = 1))
+
+MT <- add_mean_median_annotation(MT, QC_RNA, "sample", "MT")
+
+Transcripts
+Genes
+MT
+```
+
+
+
+
+### Number of cells for each sample and modality
+Now we can plot, for each sample, the number of cells being simultaneously profiled by all the three modalities. Since we will annotate the cells based on their H3K27ac signal (see **6.  Annotation**), all the cells lacking the H3K27ac profiling will result as not annotated at the end of the processing of the data. So it is important that the majority of the cells have H3K27ac profiling and that, in general, there is a good overlap among the different modalities.
+
+
+```{r number_cells, fig.height=5, fig.width=7}
+
+# ============================================================================
+# STEP 15: VISUALIZE CELL OVERLAP ACROSS MODALITIES
+# ============================================================================
+# Merge QC-passed epigenomic and RNA objects for comprehensive analysis
+obj.ls.qc_all <- append(obj.ls.qc, obj.ls_RNA_QC)
+
+# Create a list to store Venn diagram results for each sample
+venn_results <- list()
+
+# Iterate through samples to visualize modality overlap
+for (sample_name in samples) {
+  # Generate Venn diagram showing cell overlap across modalities
+  venn_result <- commonCellHistonMarks(
+    mod1 = obj.ls.qc_all[[paste0(modalities[1], "_", sample_name)]],
+    name_mod1 = gsub("H3", "", strsplit(modalities[1], "_")[[1]][1]),
+    mod2 = obj.ls.qc_all[[paste0(modalities[2], "_", sample_name)]],
+    name_mod2 = gsub("H3", "", strsplit(modalities[2], "_")[[1]][1]),
+    mod3 = obj.ls.qc_all[[paste0(modalities[3], "_", sample_name)]],
+    name_mod3 = strsplit(modalities[3], "_")[[1]][1],
+    sample = sample_name
+  )
+  
+  # Store result for later display
+  venn_results[[sample_name]] <- venn_result
+  
+  # Display Venn diagram
+  print(venn_results[[sample_name]])
+}
+```
+
+
+```{r, fig.height=5, fig.width=12}
+# Display combined Venn diagrams for all samples
+ggarrange(venn1, venn2)
+```
+
+## STEP 3: MERGE SEURAT OBJECTS ACROSS SAMPLES AND MODALITIES
+
+Now that we have QC-passed Seurat objects for each experiment, we can merge objects from different samples to obtain a single Seurat object per modality. This allows integrated analysis across biological replicates.
+
+* Input: QC-passed Seurat objects for each experiment (6 total: 2 samples × 3 modalities)
+* Output: Single merged Seurat object for each modality (3 total)
+
+### Merge objects across different samples
+```{r merge_modalities}
+# ============================================================================
+# STEP 16: MERGE SEURAT OBJECTS ACROSS SAMPLES
+# ============================================================================
+# For each modality, merge objects from different samples into a single object
+
+combined.obj.ls <- list()
+
+for (mod in modalities) {
+  cat("Merging", mod, "across samples\n")
+  
+  # Merge objects from both samples with sample-specific cell ID prefixes
+  combined.obj.ls[[mod]] <- merge(
+    obj.ls.qc_all[[paste0(mod, "_", samples[1])]],
+    y = obj.ls.qc_all[[paste0(mod, "_", samples[2])]],
+    add.cell.ids = c(samples[1], samples[2])
+  )
+}
+
+# Display assay information for merged objects
+lapply(modalities, function(mod) {
+  cat(mod, "assay:\n")
+  print(combined.obj.ls[[mod]][[str_split_fixed(mod, "_", 2)[, 1]]])
+})
+```
+```{r}
+# Verify merged objects contain expected assays
+combined.obj.ls[[modalities[1]]][["bins"]]
+combined.obj.ls[[modalities[2]]][["bins"]]
+combined.obj.ls[[modalities[3]]][["RNA"]]
+```
+
+### Select cells present across all modalities
+```{r}
+# ============================================================================
+# STEP 17: INTERSECT CELLS ACROSS ALL MODALITIES
+# ============================================================================
+# Identify barcodes present in all modalities for true multimodal analysis
+
+# Extract barcode lists from each modality
+barcode_lists <- list(
+  K4me3 = colnames(combined.obj.ls[["H3K4me3_CCTATCCT"]]),
+  K27me3 = colnames(combined.obj.ls[["H3K27me3_ATAGAGGC"]]),
+  RNA = colnames(combined.obj.ls[["RNA_AAAAGGGG"]])
+)
+
+# Find barcodes present in all three modalities
+barcodes_to_keep <- Reduce(intersect, barcode_lists)
+
+cat("Cells present in all modalities:", length(barcodes_to_keep), "\n")
+
+# Subset each modality to keep only cells with all three profiles
+combined.obj.ls_all_mod <- list()
+
+for (mod in modalities) {
+  combined.obj.ls_all_mod[[mod]] <- subset(
+    combined.obj.ls[[mod]],
+    cells = barcodes_to_keep
+  )
+  
+  cat(mod, "- cells retained:", ncol(combined.obj.ls_all_mod[[mod]]), "\n")
+}
+
+# Save multimodal object list for future analysis
+saveRDS(
+  combined.obj.ls_all_mod,
+  "/date/gcb/gcb_MZ/nanoCTAR_YD/MS/combined.obj.ls_all_mod.rds"
+)
+```
+
+
+## 4. Normalisation and dimensional reduction
+After having filter out low quality cells and having generated one Seurat object per each modality, we can proceed with normalisation and dimensionality reduction. Once again, we will follow [Signac vignette](https://stuartlab.org/signac/articles/pbmc_vignette.html#normalization-and-linear-dimensional-reduction).
+
+* First, we perform data normalisation. To this end, ```RunTFIDF``` will be used
+* Second, we select variable features (bins)
+* Third, dimension reduction by running singular value decomposition (SVD)
+```{r normalisation_variable_feat}
+# ============================================================================
+# STEP 18: NORMALIZE EPIGENOMICS DATA AND PERFORM DIMENSIONALITY REDUCTION
+# ============================================================================
+# TF-IDF Normalization and LSI (Latent Semantic Indexing) for epigenomics data
+# This workflow:
+# 1. Normalizes chromatin accessibility using TF-IDF (Term Frequency-Inverse Document Frequency)
+# 2. Identifies variable features (bins with highest variance across cells)
+# 3. Performs SVD/LSI for dimensionality reduction
+
+combined.obj.ls[1:2] <- lapply(
+  combined.obj.ls[1:2],
+  function(x) {
+    # TF-IDF Normalization
+    # Accounts for sequencing depth variation and feature frequency
+    # Note: "Some features contain 0 total counts" warning is expected after QC filtering
+    x <- RunTFIDF(x)
+
+    # Select variable features: retain bins with ≥5 counts across the dataset
+    # This keeps biologically informative peaks while removing background noise
+    x <- FindTopFeatures(x, min.cutoff = 5)
+
+    # Dimensionality Reduction: Singular Value Decomposition (SVD/LSI)
+    # LSI provides a low-dimensional representation emphasizing principal variance directions
+    x <- RunSVD(x)
+
+    x
+  }
+)
+
+```
+
+It usually happens that the first LSI (you can think it as a principal component, if you are more familiar with scrna-seq) is mostly associated to the sequencing depth, rather than biological variation. We will test this by running a modified version of the ```DepthCor``` function. The modifications simply consists in plotting the modality name as plot title.
+
+```{r fig.width = 10, fig.height = 4}
+# ============================================================================
+# STEP 19: ASSESS CORRELATION BETWEEN LSI AND SEQUENCING DEPTH
+# ============================================================================
+# Evaluate whether the first LSI component captures technical variation (sequencing depth)
+# rather than biological signal. The first LSI often correlates with depth; if so, 
+# it should be excluded from downstream analyses to avoid depth-driven artifacts.
+
+# Compute depth correlation plots for each epigenomics modality
+plot.list <- lapply(
+  combined.obj.ls[1:2],
+  DepthCorMulMod
+)
+
+# Display correlations side-by-side for visual comparison
+ggarrange(
+  plot.list[[1]],
+  plot.list[[2]],
+  ncol = 2
+)
+
+```
+
+Here, the correlation between the first LSI and sequencing depth is quite strong. We will discard it from further analyses.\
+
+
+Then, the dimensionality of the dataset should be determined. Although more sophisticated (and time consuming) methods have been implemented (like the JackStraw procedure), we think that the ‘Elbow plot’ could be informative enough. In the ‘Elbow plot’ the standard deviation explained by each LSI is plotted. When the the plateau is reached, it means that adding more LSI to our analysis does not actually increase the variability explained.
+
+```{r fig.width = 10, fig.height = 4}
+# ============================================================================
+# STEP 20: DETERMINE OPTIMAL NUMBER OF DIMENSIONS (ELBOW PLOT ANALYSIS)
+# ============================================================================
+# Identify the optimal number of LSI dimensions to retain for downstream analysis
+# The "elbow" point indicates where adding more dimensions provides diminishing returns
+# in variance explained. Dimensions beyond this plateau capture mainly noise.
+
+# Generate elbow plots showing variance explained by each LSI dimension (up to 50 dims)
+plot.list_elbow <- lapply(
+  combined.obj.ls[1:2],
+  ElbowPlot,
+  reduction = "lsi",
+  ndims = 50
+)
+
+# Display elbow plots side-by-side for modality comparison
+ggarrange(
+  plot.list_elbow[[1]],
+  plot.list_elbow[[2]],
+  ncol = 2
+)
+
+```
+
+In this case, we believe that considering the first 35 LSI should be definitely more than enough for all the three modalities (probably even less than 35 should be fine).
+\
+
+
+## 5.  Non-linear dimension reduction and clustering
+Now that we have normalised and found variable features in the data, we can perform graph-based clustering and non-linear dimension reduction for visualization. This is done individually for each modality as different modalities might require different parameters (*e.g.*, number of PCs, clustering resolution, ..).\
+
+To find the most appropriate parameter we have used, and suggest using, [clustertree](https://cran.r-project.org/web/packages/clustree/vignettes/clustree.html).\
+
+As you will notice, the resolution value for the ATAC modality is quite low (.2), but this is necessary in order to avoid over-clustering of the cluster 0. With any value of resolution greater than 0.2, the cluster 0 is subclustered in two or more clusters, but we do not think there is enough variability here to define the cells in cluster 0 as belonging to more than one cluster.
+
+```{r umap}
+# ============================================================================
+# STEP 21: PERFORM UMAP AND CLUSTERING FOR EPIGENOMICS MODALITIES
+# ============================================================================
+# Non-linear dimension reduction and graph-based clustering on each epigenomics modality
+# Note: LSI dimensions 2:pc are used (dim 1 removed due to depth correlation as shown in Step 19)
+# Different resolutions are used per modality to optimize clustering granularity
+
+pc <- 10  # Number of LSI dimensions for UMAP and clustering
+
+# --- H3K4me3 Modality ---
+# UMAP: Reduce to 2D for visualization using LSI dimensions 2-10
+combined.obj.ls$H3K4me3_CCTATCCT <- RunUMAP(
+  combined.obj.ls$H3K4me3_CCTATCCT,
+  reduction = 'lsi',
+  dims = 2:pc
+)
+
+# Graph construction: Build k-nearest neighbor graph in LSI space
+combined.obj.ls$H3K4me3_CCTATCCT <- FindNeighbors(
+  combined.obj.ls$H3K4me3_CCTATCCT,
+  reduction = 'lsi',
+  dims = 2:pc
+)
+
+# Clustering: Use resolution=0.6 for H3K4me3 (Louvain/SLM algorithm, type 3)
+combined.obj.ls$H3K4me3_CCTATCCT <- FindClusters(
+  combined.obj.ls$H3K4me3_CCTATCCT,
+  verbose = FALSE,
+  algorithm = 3,  # SLM algorithm
+  resolution = 0.6
+)
+
+# --- H3K27me3 Modality ---
+# UMAP: Reduce to 2D for visualization
+combined.obj.ls$H3K27me3_ATAGAGGC <- RunUMAP(
+  combined.obj.ls$H3K27me3_ATAGAGGC,
+  reduction = 'lsi',
+  dims = 2:pc
+)
+
+# Graph construction: Build k-nearest neighbor graph
+combined.obj.ls$H3K27me3_ATAGAGGC <- FindNeighbors(
+  combined.obj.ls$H3K27me3_ATAGAGGC,
+  reduction = 'lsi',
+  dims = 2:pc
+)
+
+# Clustering: Use resolution=0.2 for H3K27me3 (lower resolution prevents over-clustering)
+combined.obj.ls$H3K27me3_ATAGAGGC <- FindClusters(
+  combined.obj.ls$H3K27me3_ATAGAGGC,
+  verbose = FALSE,
+  algorithm = 3,
+  resolution = 0.2
+)
+```
+
+```{r fig.width = 8, fig.height = 8}
+# ============================================================================
+# STEP 22: VISUALIZE EPIGENOMICS CLUSTERS
+# ============================================================================
+# Create UMAP visualization colored by cluster identity for each modality
+
+# H3K4me3 cluster visualization
+p1 <- DimPlot(
+  combined.obj.ls$H3K4me3_CCTATCCT,
+  label = TRUE
+) +
+  NoLegend() +
+  ggtitle("H3K4me3 Clusters") +
+  labs(x = "UMAP 1", y = "UMAP 2") +
+  theme(
+    plot.title = element_text(size = 15, hjust = 0.5, face = 'bold'),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12)
+  )
+
+# H3K27me3 cluster visualization
+p2 <- DimPlot(
+  combined.obj.ls$H3K27me3_ATAGAGGC,
+  label = TRUE
+) +
+  NoLegend() +
+  ggtitle("H3K27me3 Clusters") +
+  labs(x = "UMAP 1", y = "UMAP 2") +
+  theme(
+    plot.title = element_text(size = 15, hjust = 0.5, face = 'bold'),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12)
+  )
+
+
+
+```
+
+```{r}
+# Display the clustering results
+p1
+p2
+```
+
+## SECTION 3: RNA-SPECIFIC ANALYSIS (CLUSTERING WITH AND WITHOUT DATA INTEGRATION)
+
+### 3.1 RNA CLUSTERING WITHOUT DATA INTEGRATION
+
+While the experimental design does not include multiple technical batches or biological replicates, we perform clustering both with and without data integration to provide a methodological comparison and validate cluster stability.
+
+```{r}
+# ============================================================================
+# STEP 23: RNA - NORMALIZE DATA, IDENTIFY VARIABLE FEATURES, AND RUN PCA
+# ============================================================================
+# Standard preprocessing pipeline for single-cell RNA-seq data:
+# 1. Normalize gene expression counts (log transformation)
+# 2. Identify variable features (genes with highest variance across cells)
+# 3. Scale expression values (zero mean, unit variance)
+# 4. Perform Principal Component Analysis (PCA) on variable features
+
+# Apply standard Seurat workflow
+combined.obj.ls$RNA_AAAAGGGG <- NormalizeData(combined.obj.ls$RNA_AAAAGGGG)
+combined.obj.ls$RNA_AAAAGGGG <- FindVariableFeatures(combined.obj.ls$RNA_AAAAGGGG)
+combined.obj.ls$RNA_AAAAGGGG <- ScaleData(combined.obj.ls$RNA_AAAAGGGG)
+combined.obj.ls$RNA_AAAAGGGG <- RunPCA(combined.obj.ls$RNA_AAAAGGGG)
+```
+
+```{r}
+# ============================================================================
+# STEP 24: RNA - ELBOW PLOT FOR PCA DIMENSION SELECTION
+# ============================================================================
+# Visualization of variance explained by each principal component
+# The "elbow" point indicates where adding more PCs provides diminishing returns
+# in terms of additional variance explained
+
+p1 <- ElbowPlot(combined.obj.ls$RNA_AAAAGGGG)
+p1
+```
+
+**Interpretation:** The elbow plot shows a plateau after PC 15, indicating that the first 15 principal components capture the majority of biological variance in the RNA data. These 15 PCs will be used for downstream clustering and UMAP analyses.
+
+```{r}
+# ============================================================================
+# STEP 25: RNA - GRAPH-BASED CLUSTERING WITHOUT DATA INTEGRATION
+# ============================================================================
+# Create k-nearest neighbor graph and identify communities using the Louvain algorithm
+# with resolution=2 for higher granularity (more clusters) without batch correction
+
+combined.obj.ls$RNA_AAAAGGGG <- FindNeighbors(
+  combined.obj.ls$RNA_AAAAGGGG,
+  dims = 1:15,
+  reduction = "pca"
+)
+
+combined.obj.ls$RNA_AAAAGGGG <- FindClusters(
+  combined.obj.ls$RNA_AAAAGGGG,
+  resolution = 2,
+  cluster.name = "unintegrated_clusters"
+)
+```
+
+```{r}
+# ============================================================================
+# STEP 26: RNA - UMAP VISUALIZATION WITHOUT DATA INTEGRATION
+# ============================================================================
+# Non-linear dimension reduction for visualization of RNA clusters without batch correction
+# Colored by both: (1) discovered clusters and (2) sample identity
+
+combined.obj.ls$RNA_AAAAGGGG <- RunUMAP(
+  combined.obj.ls$RNA_AAAAGGGG,
+  dims = 1:15,
+  reduction = "pca",
+  reduction.name = "umap.unintegrated"
+)
+
+# Cluster assignment visualization
+p1 <- DimPlot(
+  combined.obj.ls$RNA_AAAAGGGG,
+  reduction = "umap.unintegrated",
+  group.by = "unintegrated_clusters"
+) +
+  labs(x = "UMAP 1", y = "UMAP 2", title = "Unintegrated Clusters") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    axis.title = element_text(size = 12)
+  )
+
+# Sample identity visualization
+p2 <- DimPlot(
+  combined.obj.ls$RNA_AAAAGGGG,
+  reduction = "umap.unintegrated",
+  group.by = "orig.ident"
+) +
+  labs(x = "UMAP 1", y = "UMAP 2", title = "Sample Identity") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    axis.title = element_text(size = 12)
+  )
+
+p1
+p2
+```
+
+### 3.2 RNA CLUSTERING WITH DATA INTEGRATION AND SCT NORMALIZATION
+
+To mitigate potential technical variations and enhance biological signal, we apply Seurat v5's SCT transformation followed by integrated PCA analysis.
+
+```{r}
+# ============================================================================
+# STEP 27: RNA - SCT TRANSFORMATION WITH INTEGRATED ANALYSIS
+# ============================================================================
+# Advanced RNA normalization and integration pipeline:
+# 1. SCTransform: Variance-stabilizing transformation handling overdispersion
+# 2. Run PCA on SCT-transformed data (30 dimensions for exploration)
+# 3. IntegrateLayers: Harmonize expression across samples using RPCA
+# 4. Graph construction and clustering on integrated space
+
+# Increase memory limit for large-scale integration
+options(future.globals.maxSize = 100e+09)
+
+# Apply SCTransform normalization
+combined.obj.ls$RNA_AAAAGGGG <- SCTransform(combined.obj.ls$RNA_AAAAGGGG)
+
+# PCA on SCT data
+combined.obj.ls$RNA_AAAAGGGG <- RunPCA(
+  combined.obj.ls$RNA_AAAAGGGG,
+  npcs = 30,
+  verbose = FALSE
+)
+
+# Harmonize data using Reciprocal PCA (RPCA) integration method
+# This aligns the PCA spaces between samples
+combined.obj.ls$RNA_AAAAGGGG <- IntegrateLayers(
+  object = combined.obj.ls$RNA_AAAAGGGG,
+  method = RPCAIntegration,
+  normalization.method = "SCT",
+  verbose = FALSE
+)
+
+# Build k-nearest neighbor graph on integrated PCA space
+combined.obj.ls$RNA_AAAAGGGG <- FindNeighbors(
+  combined.obj.ls$RNA_AAAAGGGG,
+  dims = 1:15,
+  reduction = "integrated.dr"
+)
+
+# Clustering on integrated data with resolution=0.9 for finer cell state resolution
+combined.obj.ls$RNA_AAAAGGGG <- FindClusters(
+  combined.obj.ls$RNA_AAAAGGGG,
+  resolution = 0.9,
+  cluster.name = "rpca_SCT_clusters"
+)
+```
+
+```{r fig.height=8, fig.width=14}
+# ============================================================================
+# STEP 28: RNA - UMAP WITH INTEGRATED DATA ANALYSIS
+# ============================================================================
+# Non-linear dimension reduction on integrated data for final visualization
+# Colored by: (1) integrated clusters and (2) sample identity
+
+combined.obj.ls$RNA_AAAAGGGG <- RunUMAP(
+  combined.obj.ls$RNA_AAAAGGGG,
+  dims = 1:15,
+  reduction = "integrated.dr",
+  reduction.name = "umap.rpca_SCT"
+)
+
+# Define distinct colors for cluster visualization
+set.seed(1)
+cluster.cols <- distinctColorPalette(35)
+
+# Integrated cluster visualization
+p1 <- DimPlot(
+  combined.obj.ls$RNA_AAAAGGGG,
+  reduction = "umap.rpca_SCT",
+  group.by = "rpca_SCT_clusters",
+  cols = cluster.cols
+) +
+  labs(x = "UMAP 1", y = "UMAP 2") +
+  ggtitle("Integrated Clusters (RPCA + SCT)") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 24, face = "bold"),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    legend.text = element_text(size = 16),
+    legend.title = element_text(size = 24),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank()
+  )
+
+# Sample identity visualization
+p2 <- DimPlot(
+  combined.obj.ls$RNA_AAAAGGGG,
+  reduction = "umap.rpca_SCT",
+  group.by = "orig.ident"
+) +
+  labs(x = "UMAP 1", y = "UMAP 2") +
+  ggtitle("Sample Identity") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 24, face = "bold"),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    legend.text = element_text(size = 16),
+    legend.title = element_text(size = 24),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank()
+  )
+
+p1
+p2
+```
+
+## SECTION 4: REFERENCE ATLAS LABEL TRANSFER AND CELL TYPE ANNOTATION
+
+### 4.1 SILETTI ET AL. (SCIENCE 2023) HUMAN CORTEX REFERENCE
+
+```{r}
+# ============================================================================
+# STEP 29: LABEL TRANSFER FROM SILETTI ATLAS (SCIENCE 2023)
+# ============================================================================
+# Transfer cell type annotations from the Siletti et al. Science 2023 human cortex atlas
+# using canonical correlation analysis (CCA) followed by label projection
+
+# Load the reference atlas
+Human_CTX_atlas <- readRDS("/date/gcb/gcb_MZ/Analysis/Single_Cell_data_mining/ref/Siletti_CX_EA_seurat_ENS.rds")
+
+# Update object to latest Seurat version if necessary
+Human_CTX_atlas <- UpdateSeuratObject(Human_CTX_atlas)
+
+# Find transfer anchors between query and reference
+# CCA identifies corresponding cell states across datasets
+transfer_anchors <- FindTransferAnchors(
+  reference = Human_CTX_atlas,
+  query = combined.obj.ls$RNA_AAAAGGGG,
+  reference.assay = "RNA",
+  reduction = "cca",
+  npcs = 50,
+  dims = 1:50,
+  query.assay = "RNA",
+  features = VariableFeatures(combined.obj.ls$RNA_AAAAGGGG@assays[["RNA"]])
+)
+
+# Map query cells to reference cell types
+# Prediction scores indicate confidence of cell type assignment
+combined.obj.ls$RNA_AAAAGGGG <- MapQuery(
+  anchorset = transfer_anchors,
+  reference = Human_CTX_atlas,
+  query = combined.obj.ls$RNA_AAAAGGGG,
+  refdata = "cell_type"
+)
+
+# Rename predicted columns for clarity
+cn <- colnames(combined.obj.ls$RNA_AAAAGGGG@meta.data)
+cn[cn == "predicted.id"] <- "predicted.id_cell_type"
+cn[cn == "predicted.id.score"] <- "predicted.id.score_cell_type"
+colnames(combined.obj.ls$RNA_AAAAGGGG@meta.data) <- cn
+```
+
+```{r fig.height=8, fig.width=14}
+# ============================================================================
+# STEP 30: VISUALIZE SILETTI ATLAS PREDICTIONS
+# ============================================================================
+# UMAP visualization of predicted cell types from Siletti atlas
+
+# Define color palette for cell type visualization
+colors <- c("#A6CEE3","#1F78B4","#B2DF8A","#33A02C","black","gold","#6A3D9A",
+            "#FF7F00","#CAB2D6","#6A3D9A","#FFFF99","#B15928","#8DD3C7",
+            "#BEBADA","#FB8072","#80B1D3")
+
+# Plot predicted cell types from Siletti atlas
+p1 <- DimPlot(
+  combined.obj.ls$RNA_AAAAGGGG,
+  reduction = "umap.rpca_SCT",
+  group.by = "predicted.id_cell_type",
+  cols = colors
+) +
+  labs(x = "UMAP 1", y = "UMAP 2") +
+  ggtitle("Siletti et al. Cell Type Predictions") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 24, face = "bold"),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    legend.text = element_text(size = 16),
+    legend.title = element_text(size = 24),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank()
+  )
+
+p1
+```
+
+### 4.2 McNAIR ET AL. (NEURON 2024) MS LESION REFERENCE
+
+```{r}
+# ============================================================================
+# STEP 31: LABEL TRANSFER FROM McNAIR MS ATLAS (NEURON 2024)
+# ============================================================================
+# Transfer annotations from McNair et al. MS lesion snRNA-seq dataset
+# This atlas provides disease-specific cell state definitions relevant to MS pathology
+
+# Load the MS lesion reference atlas
+MS_Lesions_Roche <- readRDS(
+  "/date/gcb/gcb_EA/DataRefs2025/MS_MacNair_all_downsampled/ms_lesions_snRNAseq_seuratV5_WMEA_updated_fullFineLesionDown200.rds"
+)
+
+# Update object format if necessary
+MS_Lesions_Roche <- UpdateSeuratObject(MS_Lesions_Roche)
+
+# Set RNA as default assay for both objects
+DefaultAssay(MS_Lesions_Roche) <- "RNA"
+DefaultAssay(combined.obj.ls$RNA_AAAAGGGG) <- "RNA"
+
+# Find transfer anchors using CCA integration
+transfer_anchors <- Seurat::FindTransferAnchors(
+  reference = MS_Lesions_Roche,
+  query = combined.obj.ls[["RNA_AAAAGGGG"]],
+  reference.assay = "RNA",
+  reduction = "cca",
+  npcs = 50,
+  dims = 1:50,
+  query.assay = "RNA",
+  features = VariableFeatures(combined.obj.ls[["RNA_AAAAGGGG"]]@assays[["RNA"]]),
+  verbose = TRUE
+)
+
+# Map cells using fine-resolution type annotations from McNair atlas
+combined.obj.ls$RNA_AAAAGGGG <- MapQuery(
+  anchorset = transfer_anchors,
+  reference = MS_Lesions_Roche,
+  query = combined.obj.ls$RNA_AAAAGGGG,
+  refdata = "type_fine"
+)
+
+# Rename prediction columns for MS-specific annotations
+cn <- colnames(combined.obj.ls$RNA_AAAAGGGG@meta.data)
+cn[cn == "predicted.id"] <- "predicted.id_type_fine"
+cn[cn == "predicted.id.score"] <- "predicted.id.score_type_fine"
+colnames(combined.obj.ls$RNA_AAAAGGGG@meta.data) <- cn
+```
+
+```{r fig.height=8, fig.width=14}
+# ============================================================================
+# STEP 32: VISUALIZE McNAIR MS ATLAS PREDICTIONS
+# ============================================================================
+# UMAP visualization of MS-specific cell state predictions
+
+# Define extended color palette for MS cell state types
+colors <- c(brewer.pal(12, "Paired"), brewer.pal(11, "Set3"))
+colors <- c("#A6CEE3","#1F78B4","#B2DF8A","#33A02C","black","#E31A1C",
+            "#FDBF6F","#FF7F00","#CAB2D6","#6A3D9A","#FFFF99","#B15928",
+            "#8DD3C7","gold","#BEBADA","#FB8072","#80B1D3")
+
+# Plot MS cell state predictions
+p1 <- DimPlot(
+  combined.obj.ls$RNA_AAAAGGGG,
+  reduction = "umap.rpca_SCT",
+  group.by = "predicted.id_type_fine",
+  cols = colors
+) +
+  labs(x = "UMAP 1", y = "UMAP 2") +
+  ggtitle("McNair MS Atlas - Cell State Predictions") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 24, face = "bold"),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    legend.text = element_text(size = 16),
+    legend.title = element_text(size = 24),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank()
+  )
+
+p1
+
+# Alternative visualization by supercluster (broader cell type grouping)
+p2 <- DimPlot(
+  combined.obj.ls$RNA_AAAAGGGG,
+  reduction = "umap.rpca_SCT",
+  group.by = "predicted.id_supercluster_term",
+  cols = colors
+) +
+  labs(x = "UMAP 1", y = "UMAP 2") +
+  ggtitle("McNair MS Atlas - Supercluster Assignments") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 24, face = "bold"),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    legend.text = element_text(size = 16),
+    legend.title = element_text(size = 24),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank()
+  )
+
+# Save the predictions
+plots <- list(EAE_MOL_label_transfer = p1)
+for (nm in names(plots)) {
+  ggplot2::ggsave(
+    file.path("/date/gcb/gcb_MZ/MOL_FGF_10x/Plots/", paste0(nm, ".png")),
+    plots[[nm]],
+    width = 14,
+    height = 8,
+    dpi = 300
+  )
+}
+
+p1
+p2
+```
+
+### 4.3 MARKER GENE VISUALIZATION AND ANALYSIS
+
+```{r,fig.height=10, fig.width=20}
+# ============================================================================
+# STEP 33: VISUALIZE MARKER GENES FOR CELL TYPE IDENTIFICATION
+# ============================================================================
+# Selected marker genes for major CNS cell types
+# These genes are used to validate clusters and guide manual annotation
+
+marker_genes <- c(
+  # Oligodendrocytes and oligodendrocyte precursors
+  "SOX10", "PDGFRA", "PLP1", "MBP", "SOX6",
+  # Astrocytes
+  "AQP4", "SOX9", "GLUL",
+  # Neurons
+  "RBFOX3", "MAP2",
+  # Microglia
+  "RUNX1", "CX3CR1"
+)
+
+# Dot plot: Expression of marker genes across broad cell type clusters
+p1 <- DotPlot(
+  combined.obj.ls$RNA_AAAAGGGG,
+  features = marker_genes,
+  group.by = "MS_CTX_Broad_clustering",
+  cols = c("lightgrey", "firebrick")
+) +
+  xlab("") +
+  theme(
+    axis.text.x = element_text(hjust = 1, vjust = 0.5, family = "Arial", size = 20, angle = 90),
+    axis.text.y = element_text(family = "Arial", size = 20),
+    axis.title.y = element_text(family = "Arial", size = 24),
+    legend.text = element_text(size = 20, family = "Arial"),
+    legend.title = element_text(size = 24, family = "Arial")
+  )
+
+print(p1)
+
+# Feature plots: Visualization of individual marker genes on UMAP
+for (gene in marker_genes) {
+  p <- FeaturePlot(
+    combined.obj.ls$RNA_AAAAGGGG,
+    features = gene,
+    reduction = "umap.rpca_SCT",
+    cols = c("lightgrey", "magenta")
+  ) +
+    labs(x = "UMAP 1", y = "UMAP 2") +
+    ggtitle(paste0("Expression: ", gene)) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 48, face = "bold"),
+      axis.title.x = element_text(size = 26),
+      axis.title.y = element_text(size = 26),
+      legend.text = element_text(size = 24),
+      legend.title = element_text(size = 28),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      axis.text.x = element_blank(),
+      axis.text.y = element_blank()
+    )
+  # Display plot in the R Markdown output
+  print(p)
+}
+```
+
+### 4.4 MANUAL CLUSTER ANNOTATION
+
+Based on marker gene expression patterns and atlas predictions, clusters are manually annotated to major CNS cell types.
+
+```{r}
+# ============================================================================
+# STEP 34: ANNOTATE CLUSTERS WITH BROAD CELL TYPE IDENTITIES
+# ============================================================================
+# Manual annotation vector mapping cluster numbers to broad cell type identities
+# Created based on marker gene expression and reference atlas predictions
+
+# Define cluster identities: indices correspond to cluster numbers 0-34
+broad_cluster_identities <- c(
+  "0" = "Oligodendrocyte",
+  "1" = "Oligodendrocyte",
+  "2" = "Oligodendrocyte",
+  "3" = "Oligodendrocyte",
+  "4" = "Astrocyte",
+  "5" = "Neuron",
+  "6" = "Oligodendrocyte",
+  "7" = "Neuron",
+  "8" = "OPC",
+  "9" = "Neuron",
+  "10" = "Neuron",
+  "11" = "Microglia",
+  "12" = "Astrocyte",
+  "13" = "Neuron",
+  "14" = "Neuron",
+  "15" = "Neuron",
+  "16" = "Neuron",
+  "17" = "Astrocyte",
+  "18" = "Microglia",
+  "19" = "Neuron",
+  "20" = "Neuron",
+  "21" = "Neuron",
+  "22" = "Neuron",
+  "23" = "OPC",
+  "24" = "Pericyte/Fibroblast",
+  "25" = "Microglia",
+  "26" = "Neuron",
+  "27" = "Neuron",
+  "28" = "Neuron",
+  "29" = "Neuron",
+  "30" = "Astrocyte",
+  "31" = "Astrocyte",
+  "32" = "Neuron",
+  "33" = "Neuron",
+  "34" = "OPC"
+)
+
+# Set names for mapping to cluster identifiers
+names(broad_cluster_identities) <- levels(combined.obj.ls$RNA_AAAAGGGG)
+
+# Apply annotations to Seurat object
+combined.obj.ls$RNA_AAAAGGGG <- RenameIdents(
+  combined.obj.ls$RNA_AAAAGGGG,
+  broad_cluster_identities
+)
+
+# Store annotations in metadata for later reference
+combined.obj.ls$RNA_AAAAGGGG$MS_CTX_Broad_clustering <- Idents(combined.obj.ls$RNA_AAAAGGGG)
+```
+
+```{r fig.height=8, fig.width=14}
+# ============================================================================
+# STEP 35: VISUALIZE ANNOTATED BROAD CELL TYPE CLUSTERS
+# ============================================================================
+# UMAP colored by broad cell type annotations
+
+# Generate distinct colors for each major cell type (6 types)
+set.seed(1)
+cell_type_colors <- distinctColorPalette(6)
+
+# Create visualization
+p1 <- DimPlot(
+  combined.obj.ls$RNA_AAAAGGGG,
+  reduction = "umap.rpca_SCT",
+  group.by = "MS_CTX_Broad_clustering",
+  cols = cell_type_colors
+) +
+  labs(x = "UMAP 1", y = "UMAP 2") +
+  ggtitle("Broad Cell Type Classification") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 24, face = "bold"),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    legend.text = element_text(size = 16),
+    legend.title = element_text(size = 24),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank()
+  )
+
+p1
+```
+
+```{r}
+# ============================================================================
+# STEP 36: COMPUTE MARKER GENES FOR BROAD CELL TYPE CLUSTERS
+# ============================================================================
+# Identify differentially expressed genes for each annotated cell type
+# These markers serve as features for downstream analyses
+
+# Set assay to SCT-normalized data for marker finding
+DefaultAssay(combined.obj.ls$RNA_AAAAGGGG) <- "SCT"
+
+# Prepare SCT data for marker finding (required normalization step)
+combined.obj.ls$RNA_AAAAGGGG <- PrepSCTFindMarkers(
+  combined.obj.ls$RNA_AAAAGGGG,
+  assay = "SCT",
+  verbose = TRUE
+)
+
+# Find all markers: Identify genes upregulated in each cell type
+# only.pos = TRUE returns only genes with positive log-fold-change
+broad_cell_type_markers <- FindAllMarkers(
+  combined.obj.ls$RNA_AAAAGGGG,
+  only.pos = TRUE
+)
+
+# Export markers to Excel workbook (one sheet per cell type)
+marker_workbook <- createWorkbook()
+
+# Loop through each unique cell type and create a dedicated worksheet
+for (cell_type in unique(broad_cell_type_markers$cluster)) {
+  cell_type_markers <- subset(broad_cell_type_markers, cluster == cell_type)
+  
+  # Create sheet with descriptive name
+  sheet_name <- paste0("Markers_", cell_type)
+  addWorksheet(marker_workbook, sheet_name)
+  
+  # Write marker data to sheet
+  writeData(marker_workbook, sheet_name, cell_type_markers)
+}
+
+# Save marker results to Excel file
+saveWorkbook(
+  marker_workbook,
+  "/date/gcb/gcb_MZ/nanoCTAR_YD/MS/Broad_cluster_markers_RNA.xlsx",
+  overwrite = TRUE
+)
+
+cat("\nMarker genes successfully computed and exported to Excel file.\n")
+```
+
+```{r}
+# ============================================================================
+# STEP 37: SAVE ANNOTATED SEURAT OBJECTS
+# ============================================================================
+# Save the fully annotated Seurat object list for future reference and analysis
+
+saveRDS(
+  combined.obj.ls,
+  "/date/gcb/gcb_MZ/nanoCTAR_YD/MS/combined.obj.ls"
+)
+cat("Combined multi-omics object list saved.\n")
+
+saveRDS(
+  obj.ls.qc_all,
+  "/date/gcb/gcb_MZ/nanoCTAR_YD/MS/obj.ls.qc_all"
+)
+cat("QC-filtered object list saved.\n")
+```
+
+## SECTION 5: EPIGENOMIC ANNOTATION AND GENE ACTIVITY ANALYSIS
+
+To translate epigenomic information (H3K4me3 and H3K27me3) into functional annotations, we compute gene activity scores based on the active mark (H3K4me3). This approach leverages open chromatin regions near gene promoters as indicators of transcriptional activity.
+
+### 5.1 GENE ANNOTATIONS
+
+```{r}
+# ============================================================================
+# STEP 38: ADD GENE ANNOTATIONS TO EPIGENOMIC SEURAT OBJECTS
+# ============================================================================
+# Retrieve gene annotations from the Ensembl database
+# These annotations are essential for computing gene activity scores
+
+# Get genomic coordinates of genes from the Ensembl database object (loaded earlier)
+annotations <- GetGRangesFromEnsDb(ensdb = genome_ann)
+
+# Standardize chromosome naming to UCSC conventions (chr1, chr2, ... chrX, chrY, etc.)
+# This ensures compatibility with our aligned data
+seqlevelsStyle(annotations) <- 'UCSC'
+
+# Attach annotations to H3K4me3 Seurat object (active promoter/enhancer marks)
+Annotation(combined.obj.ls$H3K4me3_CCTATCCT) <- annotations
+
+cat("Gene annotations successfully loaded and applied.\n")
+```
+
+### 5.2 GENE ACTIVITY MATRIX CONSTRUCTION
+
+```{r}
+# ============================================================================
+# STEP 39: COMPUTE GENE ACTIVITY SCORES FROM H3K4ME3 DATA
+# ============================================================================
+# Gene activity calculation strategy:
+# 1. Extend gene coordinates 2kb upstream (capture promoter regions)
+# 2. Count fragments in each cell within extended gene regions
+# 3. Normalize to account for sequencing depth variation
+# 4. This approximates gene expression based on active chromatin marks
+
+# Calculate gene activity scores
+# Uses H3K4me3 as the chromatin mark (associated with active promoters)
+gene.activities <- GeneActivity(combined.obj.ls$H3K4me3_CCTATCCT)
+
+# Add gene activity matrix as a new assay to the Seurat object
+combined.obj.ls$H3K4me3_CCTATCCT[['RNA']] <- CreateAssayObject(
+  counts = gene.activities
+)
+
+# Normalize gene activity scores using log-normalization
+# Scale factor is median number of counts per cell for H3K4me3
+combined.obj.ls$H3K4me3_CCTATCCT <- NormalizeData(
+  object = combined.obj.ls$H3K4me3_CCTATCCT,
+  assay = 'RNA',
+  normalization.method = 'LogNormalize',
+  scale.factor = median(combined.obj.ls$H3K4me3_CCTATCCT$nCount_RNA)
+)
+
+# Set RNA assay (gene activity) as default for downstream analyses
+DefaultAssay(combined.obj.ls$H3K4me3_CCTATCCT) <- 'RNA'
+
+cat("Gene activity matrix computed and integrated successfully.\n")
+cat("Gene activity matrix computed and integrated successfully.\n")
+```
+
+### 5.3 VISUALIZATION OF GENE ACTIVITY MARKERS
+
+By visualizing gene activity scores for known canonical marker genes, we can validate cell type identities across H3K4me3 clusters. These visualizations guide manual annotation and provide biological validation of clustering results.
+
+```{r fig.width = 12, fig.height = 3}
+# ============================================================================
+# STEP 40: VISUALIZE GENE ACTIVITY FOR OLIGODENDROCYTE MARKERS
+# ============================================================================
+# Oligodendrocyte-specific genes: MAG, MBP, SOX10
+
+FeaturePlot(
+  object = combined.obj.ls$H3K4me3_CCTATCCT,
+  features = c('MAG', 'MBP', 'SOX10'),
+  pt.size = 0.1,
+  max.cutoff = 'q95',
+  ncol = 3,
+  label = TRUE
+)
+```
+
+```{r fig.width = 12, fig.height = 3}
+# STEP 40 (continued): VISUALIZE GENE ACTIVITY FOR NEURON MARKERS
+# Neuron-specific genes: RBFOX3 (NeuN), MAP2 (microtubule-associated protein)
+
+FeaturePlot(
+  object = combined.obj.ls$H3K4me3_CCTATCCT,
+  features = c('RBFOX3', 'MAP2'),
+  pt.size = 0.1,
+  max.cutoff = 'q95',
+  ncol = 2,
+  label = TRUE
+)
+```
+
+```{r fig.width = 12, fig.height = 3}
+# STEP 40 (continued): VISUALIZE GENE ACTIVITY FOR ASTROCYTE MARKERS
+# Astrocyte-specific genes: AQP4, SOX9, GLUL (glutamine synthetase)
+
+FeaturePlot(
+  object = combined.obj.ls$H3K4me3_CCTATCCT,
+  features = c('AQP4', 'SOX9', 'GLUL'),
+  pt.size = 0.1,
+  max.cutoff = 'q95',
+  ncol = 3,
+  label = TRUE
+)
+```
+
+## SECTION 6: HIERARCHICAL CELL TYPE ANNOTATION
+
+To systematize the annotation process, we employ a two-layer annotation system:
+- **Layer 1 (Broad type):** Major cell class (Neuron, Glia, Immune, Vascular)
+- **Layer 2 (Specific state):** Fine-grained cell state or subtype
+
+### 6.1 LAYER 2: FINE-GRAINED CELL STATE ANNOTATION
+
+```{r}
+# ============================================================================
+# STEP 41: ASSIGN LAYER 2 - FINE-GRAINED CELL STATE IDENTITIES
+# ============================================================================
+# Create detailed cell state annotations for H3K4me3 clusters
+# These annotations reflect specific functional states within cell types
+
+# Define mapping from cluster numbers to cell state identities
+layer2_identities <- c(
+  "0" = "AST-TE",           # Astrocytes - telencephalon
+  "1" = "VEC",              # Vascular endothelial cells
+  "2" = "MGL",              # Microglia
+  "3" = "AST-NT",           # Astrocytes - non-telencephalon
+  "4" = "OL",               # Oligodendrocytes
+  "5" = "EXC1",             # Excitatory neurons 1
+  "6" = "VLMC",             # Vascular smooth muscle cells
+  "7" = "EXC2",             # Excitatory neurons 2
+  "8" = "BG",               # Bergmann glia
+  "9" = "INH1",             # Inhibitory neurons 1
+  "10" = "CHP",             # Choroid plexus
+  "11" = "INH2",            # Inhibitory neurons 2
+  "12" = "OEC",             # Olfactory ensheating cells
+  "13" = "INH3"             # Inhibitory neurons 3
+)
+
+# Set names to match cluster levels
+names(layer2_identities) <- levels(combined.obj.ls$H3K27ac_ATAGAGGC)
+
+# Apply layer 2 annotations
+combined.obj.ls$H3K27ac_ATAGAGGC <- RenameIdents(
+  combined.obj.ls$H3K27ac_ATAGAGGC,
+  layer2_identities
+)
+
+# Store layer 2 annotations in metadata
+combined.obj.ls$H3K27ac_ATAGAGGC$layer2_annotation <- Idents(combined.obj.ls$H3K27ac_ATAGAGGC)
+
+# Visualize layer 2 annotations
+p1 <- DimPlot(
+  combined.obj.ls$H3K27ac_ATAGAGGC,
+  label = TRUE,
+  repel = TRUE
+) +
+  NoLegend() +
+  ggtitle("Layer 2: Fine Cell State Annotation") +
+  theme(plot.title = element_text(size = 15, hjust = 0.5, face = 'bold'))
+
+p1
+```
+
+### 6.2 LAYER 1: BROAD CELL TYPE CLASSIFICATION
+
+```{r}
+# ============================================================================
+# STEP 42: ASSIGN LAYER 1 - BROAD CELL TYPE IDENTITIES
+# ============================================================================
+# Create broad cell type annotations by grouping specific states
+# This provides a higher-level classification for major biological functions
+
+# Define mapping from layer 2 states to layer 1 broad types
+layer1_identities <- c(
+  "AST-TE" = "Astroependymal",
+  "VEC" = "Vascular",
+  "MGL" = "Immune",
+  "AST-NT" = "Astroependymal",
+  "OL" = "Oligodendrocytes",
+  "EXC1" = "Neurons",
+  "VLMC" = "Vascular",
+  "EXC2" = "Neurons",
+  "BG" = "Astroependymal",
+  "INH1" = "Neurons",
+  "CHP" = "Astroependymal",
+  "INH2" = "Neurons",
+  "OEC" = "OEC",
+  "INH3" = "Neurons"
+)
+
+# Set names to match current identities
+names(layer1_identities) <- levels(combined.obj.ls$H3K27ac_ATAGAGGC)
+
+# Apply layer 1 annotations
+combined.obj.ls$H3K27ac_ATAGAGGC <- RenameIdents(
+  combined.obj.ls$H3K27ac_ATAGAGGC,
+  layer1_identities
+)
+
+# Store layer 1 annotations in metadata
+combined.obj.ls$H3K27ac_ATAGAGGC$layer1_annotation <- Idents(combined.obj.ls$H3K27ac_ATAGAGGC)
+
+# Visualize layer 1 annotations (without cluster labels for clarity)
+p2 <- DimPlot(
+  combined.obj.ls$H3K27ac_ATAGAGGC,
+  label = FALSE
+) +
+  ggtitle("Layer 1: Broad Cell Type Classification") +
+  theme(plot.title = element_text(size = 15, hjust = 0.5, face = 'bold'))
+
+p2
+```
+
+```{r fig.width = 10, fig.height = 4, echo = FALSE}
+# ============================================================================
+# STEP 42 (continued): COMBINED VISUALIZATION OF ANNOTATION LAYERS
+# ============================================================================
+# Display both layer 1 and layer 2 annotations side by side
+
+p2 + p1
+```
+
+### 6.3 TRANSFER ANNOTATIONS ACROSS MODALITIES
+
+To integrate annotations across all modalities, we transfer the H3K4me3-derived annotations to H3K27me3 and ATAC modalities for consistent cell type assignment.
+
+```{r}
+# ============================================================================
+# STEP 43: TRANSFER ANNOTATIONS TO OTHER MODALITIES
+# ============================================================================
+# Extract annotation information from annotated H3K4me3 object
+layer1_annotations <- combined.obj.ls$H3K27ac_ATAGAGGC$layer1_annotation
+layer2_annotations <- combined.obj.ls$H3K27ac_ATAGAGGC$layer2_annotation
+
+# Transfer annotations to ATAC modality
+combined.obj.ls$ATAC_TATAGCCT <- AddMetaData(
+  combined.obj.ls$ATAC_TATAGCCT,
+  layer1_annotations,
+  col.name = 'layer1_annotation'
+)
+
+combined.obj.ls$ATAC_TATAGCCT <- AddMetaData(
+  combined.obj.ls$ATAC_TATAGCCT,
+  layer2_annotations,
+  col.name = 'layer2_annotation'
+)
+
+# Transfer annotations to H3K27me3 modality
+combined.obj.ls$H3K27me3_CCTATCCT <- AddMetaData(
+  combined.obj.ls$H3K27me3_CCTATCCT,
+  layer1_annotations,
+  col.name = 'layer1_annotation'
+)
+
+combined.obj.ls$H3K27me3_CCTATCCT <- AddMetaData(
+  combined.obj.ls$H3K27me3_CCTATCCT,
+  layer2_annotations,
+  col.name = 'layer2_annotation'
+)
+
+cat("Cell type annotations successfully transferred across all modalities.\n")
+```
+
+```{r fig.width = 10, fig.height = 4}
+# ============================================================================
+# STEP 43 (continued): VISUALIZE ANNOTATIONS ACROSS MODALITIES
+# ============================================================================
+# Display cell type annotations consistently across all three modalities
+
+p1 <- DimPlot(
+  combined.obj.ls$ATAC_TATAGCCT,
+  label = TRUE,
+  repel = FALSE,
+  group.by = "layer2_annotation"
+) +
+  NoLegend() +
+  ggtitle("ATAC") +
+  theme(plot.title = element_text(size = 15, hjust = 0.5, face = 'bold'))
+
+p2 <- DimPlot(
+  combined.obj.ls$H3K27ac_ATAGAGGC,
+  label = TRUE,
+  repel = FALSE,
+  group.by = "layer2_annotation"
+) +
+  NoLegend() +
+  ggtitle("H3K4me3") +
+  theme(plot.title = element_text(size = 15, hjust = 0.5, face = 'bold'))
+
+p3 <- DimPlot(
+  combined.obj.ls$H3K27me3_CCTATCCT,
+  label = TRUE,
+  repel = FALSE,
+  group.by = "layer2_annotation"
+) +
+  NoLegend() +
+  ggtitle("H3K27me3") +
+  theme(plot.title = element_text(size = 15, hjust = 0.5, face = 'bold'))
+
+# Arrange plots in a grid (3 modalities side by side)
+ggarrange(p1, p2, p3, ncol = 3)
+```
+
+```{r fig.width = 10, fig.height = 4}
+# ============================================================================
+# STEP 43 (final): CONNECTIVITY PLOT ACROSS MODALITIES
+# ============================================================================
+# Visualize cell type distributions and relationships across modalities
+
+plotConnectModal(seurat = combined.obj.ls, group = 'layer1_annotation')
+```
+
+## SECTION 7: FINAL ANALYSIS AND RESULTS EXPORT
+
+### 7.1 SAVE FINAL ANNOTATED MULTI-OMICS OBJECTS
+
+```{r}
+# ============================================================================
+# STEP 44: SAVE FULLY ANNOTATED ANALYSIS OBJECTS
+# ============================================================================
+# Save the complete multi-omics dataset with all annotations for future analyses
+# These RDS objects contain:
+# - All three modalities (H3K4me3, H3K27me3, RNA, ATAC)
+# - Integrated cell identities
+# - Two-layer annotation system (broad and specific)
+# - All quality metrics and metadata
+
+saveRDS(
+  combined.obj.ls,
+  file = "/cfs/klemming/home/m/matzag/Multi_nanoCTRNA/nanoscope_final_bins_5kb.rds"
+)
+
+cat("\n=== ANALYSIS COMPLETE ===\n")
+cat("Final annotated multi-omics dataset saved:\n")
+cat("  File: nanoscope_final_bins_5kb.rds\n")
+cat("  Content: 6 Seurat objects (H3K4me3, H3K27me3, RNA, ATAC for 2 samples)\n")
+cat("  Annotations: 2-layer hierarchical annotation system\n\n")
+```
+
+## SECTION 8: SESSION INFORMATION
+
+```{r session_info}
+# ============================================================================
+# STEP 45: SESSION INFORMATION
+# ============================================================================
+# Print comprehensive session information for reproducibility
+# This documents all package versions, loaded libraries, and system details
+
+cat("\n=== SESSION INFORMATION ===\n\n")
+sessionInfo()
+cat("\n=== END OF ANALYSIS ===\n")
+```
+
+
+
+
+
+
+

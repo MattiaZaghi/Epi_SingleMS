@@ -1,0 +1,345 @@
+---
+title: "MS_1"
+author: "Mattia Zaghi"
+date: "2025-10-22"
+output: html_document
+---
+
+## What is this tutorial for?
+
+This tutorial describes how to perform the downstream analysis on single-cell nano CUT&Tag data (2 biological replicates, 3 modalities), quantifying the fragment counts in genomic bins instead of peaks.
+
+This tutorial assumes that the data have already been preprocessed, including demultiplexing of the different modalities, running cellranger and custom cell calling (see [Set Up](https://github.com/bartosovic-lab/nanoscope#set-up) and [Preprocessing](https://github.com/bartosovic-lab/nanoscope#preprocessing)).\
+
+
+
+**Please note how in this tutorial we are describing how to perform the downstream analysis by using bins, not peaks.** For tutorial on peaks, see [here](https://fansalon.github.io/vignette_single-cell-nanoCT.html).\
+
+In addition, note how the biological data here analysed are 2 biological replicates of the same sample, thus it is safe to merge the two samples without any kind of integration. Often experiments are designed in order to have multiple samples and/or biological conditions requiring data integration, differential analysis, etc. These are not part of this vignette, but will be implemented in other vignettes in the future.\
+
+
+
+The downstream analysis implemented in this vignette is composed of 6 steps:\
+
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;**1.  Data loading (metadata and fragments)**\
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;**2.  Quality controls (QC)**\
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;**3.  Merge Seurat objects**\
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;**4.  Normalisation and dimensional reduction**\
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;**5.  Non-linear dimension reduction and clustering**\
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;**6.  Annotation**\
+\
+
+## Where/how can I get the input data?
+* If you are following [our tutorial](https://github.com/bartosovic-lab/nanoscope), your input data will probably already formatted in the proper way and stored in subdirectories of the  ```~/NatProt/nanoscope/``` folder\
+* If you have skipped the tutorial and just want to run this vignette, downloaded the toy data from [Zenodo](https://zenodo.org/record/7759368#.ZBrMcC-B3Eo)\
+* If you are running this vignette on your personal data, you will need to generate, for each sample and modality, the ```fragments.tsv.gz```, ```fragments.tsv.gz.tbi``` and ```metadata.csv``` files and store them in specific folders (see below section "1.1 Setting some initial variables")\
+\
+
+
+## 1. Data loading (metadata and fragments)
+In this section we are going to load the input files for each modality and sample, create a fragment object for each experiment, generate a bins x cell matrix for each experiment and finally generate one Seurat object for experiment.
+
+* Inputs of this section are the ```fragments.tsv.gz``` and ```metadata.csv``` files.\
+* Output of his section is a Seurat object for each experiment (6 in this case [2 samples * 3 modalities]).\
+
+First, load all the required libraries.
+
+```{r setup2}
+rm(list = ls())
+library(Signac)
+library(Seurat)
+library(GenomicRanges)
+library(future)
+library(stringr)
+library(ggplot2)
+library(gghalves)
+library(ggpubr)
+library(EnsDb.Hsapiens.v86)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(ComplexUpset)
+library(regioneR)
+library(scales)
+library(ggVennDiagram)
+library(dplyr)
+library(RColorBrewer)
+library(randomcoloR)
+library(readxl)
+library(openxlsx)
+```
+
+
+
+
+1.Unify the multimodal object in unique object
+
+```{r}
+#load the multimodal cells
+
+combined.obj.ls_all_mod<-readRDS("/date/gcb/gcb_MZ/nanoCTAR_YD/MS/combined.obj.ls_all_mod.rds")
+
+```
+
+
+
+```{r}
+#extract assay and metadata and create a unique object
+
+meta_RNA <- combined.obj.ls_all_mod[["RNA_AAAAGGGG"]]@meta.data
+meta2_H3K4me3 <- combined.obj.ls_all_mod[["H3K27me3_ATAGAGGC"]]@meta.data
+meta3_H3K27me3 <- combined.obj.ls_all_mod[["H3K4me3_CCTATCCT"]]@meta.data
+
+# Add suffixes to avoid name clashes
+colnames(meta2_H3K4me3) <- paste0(colnames(meta2_H3K4me3), "_H3K27me3")
+colnames(meta3_H3K27me3) <- paste0(colnames(meta3_H3K27me3), "_H3K4me3")
+
+meta_all <- cbind(meta_RNA, meta2_H3K4me3[rownames(meta_RNA), ], meta3_H3K27me3[rownames(meta_RNA), ])
+
+
+rna  <- combined.obj.ls_all_mod[["RNA_AAAAGGGG"]]@assays[["RNA"]]
+H3K4me3 <- combined.obj.ls_all_mod[["H3K4me3_CCTATCCT"]]@assays[["H3K4me3_bins"]]
+H3K27me3  <- combined.obj.ls_all_mod[["H3K27me3_ATAGAGGC"]]@assays[["H3K27me3_bins"]]
+
+MS_MultiOmics <- CreateSeuratObject(counts = GetAssayData(rna, "counts"), meta.data = meta_all)
+MS_MultiOmics[["RNA"]]  <- rna
+MS_MultiOmics[["H3K4me3"]] <- H3K4me3
+MS_MultiOmics[["H3K27me3"]]  <- H3K27me3
+
+DefaultAssay(MS_MultiOmics) <- "RNA"
+
+
+```
+
+
+H3K4me3 dimensionality reduction
+
+```{r}
+
+DefaultAssay(MS_MultiOmics)<- "H3K4me3"
+
+  MS_MultiOmics<- RunTFIDF(MS_MultiOmics)
+
+    # Select variable features: keep peaks with at least 5 counts across cells
+    MS_MultiOmics <- FindTopFeatures(MS_MultiOmics, min.cutoff = 5)
+
+    # Dimensionality reduction: perform SVD (LSI) on the TF-IDF matrix
+   MS_MultiOmics <- RunSVD(MS_MultiOmics)
+    
+    pc<-10
+# H3K27ac
+MS_MultiOmics <- RunUMAP(MS_MultiOmics,reduction = 'lsi', dims = 2:pc,reduction.name = "umap_H3K4me3")
+MS_MultiOmics <- FindNeighbors(MS_MultiOmics,reduction = 'lsi', dims = 2:pc)
+MS_MultiOmics <- FindClusters(MS_MultiOmics, verbose = FALSE, algorithm = 3,resolution = .6)
+```
+dimensionality reduction
+
+final broad clustering UMAP
+
+```{r,fig.height=8, fig.width=14}
+
+set.seed(1)
+cluster.cols <- distinctColorPalette(6) 
+
+
+p1<-DimPlot(MS_MultiOmics,reduction = "umap_H3K4me3",group.by = "MS_CTX_Broad_clustering",cols = cluster.cols)+
+  labs(x = "UMAP 1", y = "UMAP 2") +
+  ggtitle("Clustering H3K4me3") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      size = 24,
+      face = "bold"
+    ),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    legend.text = element_text(size = 16),         # Legend labels
+    legend.title = element_text(size = 24),  # Legend title
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank()
+  )
+
+p1
+```
+
+H3K27me3 dimensionality reduction
+
+```{r}
+
+DefaultAssay(MS_MultiOmics)<- "H3K27me3"
+
+  MS_MultiOmics<- RunTFIDF(MS_MultiOmics)
+
+    # Select variable features: keep peaks with at least 5 counts across cells
+    MS_MultiOmics <- FindTopFeatures(MS_MultiOmics, min.cutoff = 5)
+
+    # Dimensionality reduction: perform SVD (LSI) on the TF-IDF matrix
+   MS_MultiOmics <- RunSVD(MS_MultiOmics,reduction.name = "lsi_H3K27me3")
+    
+    pc<-10
+# H3K27ac
+MS_MultiOmics <- RunUMAP(MS_MultiOmics,reduction = 'lsi_H3K27me3', dims = 2:pc,reduction.name = "umap_H3K27me3")
+MS_MultiOmics <- FindNeighbors(MS_MultiOmics,reduction = 'lsi_H3K27me3', dims = 2:pc)
+MS_MultiOmics <- FindClusters(MS_MultiOmics, verbose = FALSE, algorithm = 3,resolution = .6)
+```
+
+
+
+final broad clustering UMAP
+
+```{r,fig.height=8, fig.width=14}
+
+set.seed(1)
+cluster.cols <- distinctColorPalette(6) 
+
+
+p1<-DimPlot(MS_MultiOmics,reduction = "umap_H3K27me3",group.by = "MS_CTX_Broad_clustering",cols = cluster.cols)+
+  labs(x = "UMAP 1", y = "UMAP 2") +
+  ggtitle("Cluster H3K27me3") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      size = 24,
+      face = "bold"
+    ),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    legend.text = element_text(size = 16),         # Legend labels
+    legend.title = element_text(size = 24),  # Legend title
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank()
+  )
+
+p1
+```
+
+RNA clustering
+
+```{r}
+DefaultAssay(MS_MultiOmics)<- "RNA"
+
+MS_MultiOmics <- NormalizeData(MS_MultiOmics)
+MS_MultiOmics <- FindVariableFeatures(MS_MultiOmics)
+MS_MultiOmics <- ScaleData(MS_MultiOmics)
+MS_MultiOmics <- RunPCA(MS_MultiOmics)
+```
+```{r}
+options(future.globals.maxSize = 100e+09)
+MS_MultiOmics <- SCTransform(MS_MultiOmics)
+MS_MultiOmics  <- RunPCA(MS_MultiOmics, npcs = 30, verbose = T)
+MS_MultiOmics <- IntegrateLayers(
+  object               = MS_MultiOmics,
+  method               = RPCAIntegration,
+  normalization.method = "SCT",
+  orig.reduction       = "pca",              # or the reduction you used per layer
+  new.reduction        = "integrated.rpca",
+  layers               = DefaultAssay(MS_MultiOmics),  # i.e. "SCT"
+  verbose              = TRUE
+)
+
+MS_MultiOmics  <- FindNeighbors(MS_MultiOmics, dims = 1:15, reduction = "integrated.rpca")
+MS_MultiOmics  <- FindClusters(MS_MultiOmics,resolution = 0.3,cluster.name = "rpca_SCT_clusters")
+MS_MultiOmics<- RunUMAP(MS_MultiOmics, dims = 1:15, reduction = "integrated.rpca",reduction.name = "umap.rpca_SCT")
+
+```
+
+
+
+
+```{r,fig.height=8, fig.width=14}
+
+set.seed(1)
+cluster.cols <- distinctColorPalette(6) 
+
+
+p1<-DimPlot(MS_MultiOmics,reduction = "umap.rpca_SCT",group.by = "MS_CTX_Broad_clustering",cols = cluster.cols)+
+  labs(x = "UMAP 1", y = "UMAP 2") +
+  ggtitle("Cluster RNA") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      size = 24,
+      face = "bold"
+    ),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    legend.text = element_text(size = 16),         # Legend labels
+    legend.title = element_text(size = 24),  # Legend title
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank()
+  )
+
+p1
+```
+
+
+WNN
+
+```{r}
+DefaultAssay(MS_MultiOmics) <- "RNA"
+
+MS_MultiOmics <- FindMultiModalNeighbors(
+  MS_MultiOmics,
+  reduction.list = list("integrated.rpca", "lsi", "lsi_H3K27me3"),
+  dims.list      = list(1:30,      1:30,          1:30),
+  modality.weight.name = "RNA.weight"  # name for stored modality weights
+)
+```
+
+Clustering and UMAP based on the WNN
+
+
+```{r}
+# Cluster on the WNN SNN graph
+MS_MultiOmics  <- FindClusters(
+  MS_MultiOmics,
+  graph.name = "wsnn",
+  algorithm = 3,        # Leiden
+  resolution = 0.5
+)
+
+# UMAP using WNN neighbors
+
+MS_MultiOmics <-RunUMAP(MS_MultiOmics, nn.name = "weighted.nn", reduction.name = "wnn.umap", reduction.key = "wnnUMAP_")
+
+
+```
+
+```{r,fig.height=8, fig.width=14}
+
+set.seed(1)
+cluster.cols <- distinctColorPalette(6) 
+
+
+p1<-DimPlot(MS_MultiOmics,reduction = "wnn.umap",group.by = "MS_CTX_Broad_clustering",cols = cluster.cols)+
+  labs(x = "UMAP 1", y = "UMAP 2") +
+  ggtitle("WNN all modalities") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      size = 24,
+      face = "bold"
+    ),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    legend.text = element_text(size = 16),         # Legend labels
+    legend.title = element_text(size = 24),  # Legend title
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank()
+  )
+
+p1
+```
+
+
+

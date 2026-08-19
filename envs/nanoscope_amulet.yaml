@@ -1,0 +1,12 @@
+name: nanoscope_amulet
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - numpy
+  - pandas
+  - scipy
+  - pysam
+  - statsmodels

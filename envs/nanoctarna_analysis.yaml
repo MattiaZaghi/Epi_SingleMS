@@ -1,0 +1,49 @@
+# Conda environment for the R downstream analysis layer of multiNanoCT+RNA.
+# Installs the full Seurat/Signac analysis stack from PREBUILT conda-forge/bioconda
+# binaries (no BiocManager source compilation), sufficient to render
+# analysis/main/first_eval_MGI.Rmd.
+#
+# Build:
+#   conda env create -f envs/nanoctarna_analysis.yaml
+# Use:
+#   conda run -n nanoctarna-analysis Rscript analysis/main/render_first_eval.R
+#
+# Channel priority must be strict (conda-forge > bioconda > nodefaults).
+name: nanoctarna-analysis
+channels:
+  - conda-forge
+  - bioconda
+  - nodefaults
+dependencies:
+  # --- core R + build/render toolchain ---
+  - r-base >=4.3
+  - r-matrix
+  - r-remotes
+  - r-knitr
+  - r-rmarkdown
+  - pandoc
+  # --- single-cell multimodal stack ---
+  - r-seurat
+  - r-signac
+  # --- Bioconductor genomics + references ---
+  - bioconductor-genomicranges
+  - bioconductor-ensdb.hsapiens.v86
+  - bioconductor-bsgenome.hsapiens.ucsc.hg38
+  # --- plotting / QC helpers ---
+  - r-ggplot2
+  - r-ggpubr
+  - r-ggvenndiagram
+  - r-complexupset
+  - r-gghalves
+  - r-randomcolor
+  - r-rcolorbrewer
+  - r-scales
+  # --- data wrangling / IO ---
+  - r-dplyr
+  - r-stringr
+  - r-tidyr
+  - r-readxl
+  - r-openxlsx
+  - r-future
+  - r-future.apply
+  - r-yaml

@@ -1,0 +1,101 @@
+=== /date/gcb/gcb_MZ/Human_brain_epi_atlas/GSE327101_H3K27ac.h5ad ===
+339097 cells x 202081 features
+
+obs_names (cell ids):
+    BC813:AAACAAGCAACATAGT-1
+    BC813:AAACAAGCAAGGAATA-1
+    BC813:AAACAAGCACAAACGC-1
+    BC813:AAACAAGCATGCAACA-1
+    BC813:AAACCAGGTACTGGCC-1
+
+16bp barcode extracted with '([ACGT]{16})': 339097/339097 matched
+    e.g. ['AAACAAGCAACATAGT', 'AAACAAGCAAGGAATA', 'AAACAAGCACAAACGC']
+    unique barcodes: 301311   (if < n_cells, barcodes repeat across patients -> you MUST match on patient+barcode)
+
+.obs columns (candidates for --h5ad-sample-col marked *):
+    n_fragment                       category   nuniq=11868  ['5745', '5642', '4021', '9508', '1889', '2010']
+    frac_dup                         category   nuniq=315563 ['0.7599548740233151', '0.7574376612209802', '0.7495796225945071', '0.7788734359737662', '0.7447987030532288', '0.7606572993569898']
+    frac_mito                        category   nuniq=2964   ['0.0', '0.0003549875754348598', '0.0010090817356205853', '0.001199040767386091', '0.0008547008547008547', '0.0003027550711474417']
+    dna                              category   nuniq=72     ['BC813', 'BC842', 'BC857', 'BI007', 'BI009', 'BI023']
+    rna                              category   nuniq=72     ['BC827', 'BC855', 'BC865', 'BI015', 'BI017', 'BI037']
+  * region                           category   nuniq=18     ['PN', 'CBL', 'A25', 'ITG', 'Idg', 'CBV']
+  * structure                        category   nuniq=3      ['Pons', 'Cerebellum', 'Cortex']
+  * donor                            category   nuniq=3      ['Donor1', 'Donor4', 'Donor2']
+    target                           category   nuniq=1      ['H3K27ac']
+    rna_bc                           object     nuniq=339097 ['BC827:GGCTAGTGTACTTCAC-1', 'BC827:GGCTAGTGTTTGCAGA-1', 'BC827:GGCTAGTGTGTTTGTC-1', 'BC827:GGCTAGTGTCAAAGGG-1', 'BC827:GTTTAACCACCAACCG-1', 'BC827:GATTCCTGTGTAATAC-1']
+    atac_bc                          category   nuniq=304946 ['AAACAAGCAACATAGT-1', 'AAACAAGCAAGGAATA-1', 'AAACAAGCACAAACGC-1', 'AAACAAGCATGCAACA-1', 'AAACCAGGTACTGGCC-1', 'AAACCGCCAAGCGCTG-1']
+  * index                            category   nuniq=3      ['GG', 'ATT', 'AC']
+  * condition                        category   nuniq=52     ['Donor1_PN_Pons_H3K27ac', 'Donor4_PN_Pons_H3K27ac', 'Donor2_PN_Pons_H3K27ac', 'Donor2_CBL_Cerebellum_H3K27ac', 'Donor2_A25_Cortex_H3K27ac', 'Donor2_ITG_Cortex_H3K27ac']
+  * subclass                         category   nuniq=35     ['OGC', 'MGC', 'OPC', 'LRL', 'AST', 'FBL']
+  * supercluster                     category   nuniq=19     ['Oligodendrocyte', 'Microglia', 'Oligodendrocyte precursor', 'Lower rhombic lip', 'Astrocyte', 'Fibroblast']
+    cluster                          category   nuniq=160    ['OGC-1', 'OGC-4', 'MGC-2', 'OGC-3', 'OGC-2', 'OPC-1']
+  * class                            category   nuniq=3      ['NonN', 'Glut', 'GABA']
+
+=== /date/gcb/gcb_MZ/Human_brain_epi_atlas/fragemnts/GSM9648290_BC813_fragments.tsv.gz ===
+fragments column 4:
+    AAAGCGAAGTTTGACT-1
+    AAAGTCATCGTTAAAG-1
+    AAATAGGCACAAACGC-1
+    AAATCGATCCTAACCA-1
+    AAATTGCCACAGCAAC-1
+extracted: ['AAAGCGAAGTTTGACT', 'AAAGTCATCGTTAAAG', 'AAATAGGCACAAACGC', 'AAATCGATCCTAACCA', 'AAATTGCCACAGCAAC']
+
+3 of these 5 example barcodes appear in the h5ad -> extraction is consistent
+
+52 distinct donor + region combinations (these are your samplesheet h5ad_value entries):
+    Donor4|V1C                                         13956 cells
+    Donor4|CBV                                         12765 cells
+    Donor2|CBL                                         12033 cells
+    Donor1|Idg                                         11195 cells
+    Donor4|CBL                                         10851 cells
+    Donor2|V1C                                          9424 cells
+    Donor1|M1C                                          9299 cells
+    Donor4|PN                                           9264 cells
+    Donor4|A38                                          9228 cells
+    Donor1|Pro                                          8347 cells
+    Donor1|A5-A7                                        8316 cells
+    Donor2|M1C                                          7775 cells
+    Donor4|A5-A7                                        7664 cells
+    Donor2|ITG                                          7578 cells
+    Donor1|CBL                                          7533 cells
+    Donor4|A46                                          7530 cells
+    Donor2|Pro                                          7253 cells
+    Donor1|A19                                          7039 cells
+    Donor1|V1C                                          6991 cells
+    Donor2|Ig                                           6905 cells
+    Donor4|V2                                           6863 cells
+    Donor4|Idg                                          6799 cells
+    Donor1|V2                                           6731 cells
+    Donor2|A38                                          6728 cells
+    Donor2|V2                                           6683 cells
+    Donor4|Pro                                          6574 cells
+    Donor2|TH-TL                                        6530 cells
+    Donor2|A5-A7                                        6215 cells
+    Donor1|A38                                          5926 cells
+    Donor2|A19                                          5720 cells
+    Donor2|PN                                           5711 cells
+    Donor1|Ig                                           5390 cells
+    Donor1|CBV                                          5346 cells
+    Donor1|MEC                                          5328 cells
+    Donor4|MTG                                          5281 cells
+    Donor2|MEC                                          5183 cells
+    Donor2|A46                                          5086 cells
+    Donor4|A19                                          5020 cells
+    Donor1|TH-TL                                        4864 cells
+    Donor2|MTG                                          4814 cells
+    Donor1|PN                                           4566 cells
+    Donor2|Idg                                          4407 cells
+    Donor4|Ig                                           4346 cells
+    Donor4|A25                                          4226 cells
+    Donor1|MTG                                          4182 cells
+    Donor2|A25                                          4088 cells
+    Donor1|A46                                          4047 cells
+    Donor4|TH-TL                                        2772 cells
+    Donor4|ITG                                          2440 cells
+    Donor2|CBV                                          2203 cells
+    Donor1|ITG                                          2060 cells
+    Donor1|A25                                          2022 cells
+
+Next: write a samplesheet (sample,h5ad_value,fragments[,peaks]) and run `build`.
+      Use the starred .obs column above for --h5ad-sample-col, and put its
+      exact values in the h5ad_value column.
