@@ -64,16 +64,8 @@ filtered_data <- combined_data %>%
 filtered_data$Sample<- gsub("_yield\\.txt$", "", filtered_data$Sample)
 
 # Let's say you want to plot only a specific subset of samples:
-selected_samples <- c( #"FC_Droplet_Paired-Tag_rep1_H3K27ac",
-                       #"FC_Droplet_Paired-Tag_rep1_H3K27me3",
-                       #"FC_Droplet_Paired-Tag_rep2_H3K27ac","FC_Droplet_Paired-Tag_rep2_H3K27me3",
-                       #"FC_Droplet_Paired-Tag_rep3_H3K27ac","FC_Droplet_Paired-Tag_rep3_H3K27me3",
-                      #"nanoCTAR_e13_1_ATAC","nanoCTAR_e13_1_H3K27ac","nanoCTAR_e13_1_H3K27me3",
-                      #"nanoCTAR_e13_2_ATAC","nanoCTAR_e13_2_H3K27ac","nanoCTAR_e13_2_H3K27me3")
-                      #"nanoCTAR_e13_K4me3_1_ATAC","nanoCTAR_e13_K4me3_1_H3K4me3","nanoCTAR_e13_K4me3_1_H3K27me3",
-                      #"nanoCTAR_e13_K4me3_2_ATAC","nanoCTAR_e13_K4me3_2_H3K4me3","nanoCTAR_e13_K4me3_2_H3K27me3",
-                      "MS_1_H3K4me3","MS_1_H3K27me3",
-                      "MS_2_H3K4me3","MS_2_H3K27me3")        
+selected_samples <- c("MS_1_H3K4me3","MS_1_H3K27me3",
+                      "MS_2_H3K4me3","MS_2_H3K27me3")
 # Replace these names with exactly those you want to plot, matching entries in filtered_data$Sample
 
 
@@ -144,7 +136,7 @@ p <- ggplot(filtered_selected, aes(
   scale_color_manual(values = palette) +
   scale_fill_manual(values = palette) +
   labs(
-    title = "LC curve: nanoCTAR vs scCut&Tag pro",
+    title = "LC curve: nanoCTAR MS samples",
     x = "Total Reads (millions)",
     y = "Expected Distinct Reads (millions)"
   ) +
@@ -153,7 +145,7 @@ p <- ggplot(filtered_selected, aes(
 print(p)
 
 # SAVE THE PLOT as a PNG
-ggsave("/proj/user/mattia/Embryo_2/plots/LC_Curve_nanoCTAR_e13_modalities_scCut_Tag_pro.png", plot = p, width = 10, height = 7, dpi = 350)
+ggsave(file.path(base_dirs[1], "plots", "LC_Curve_MS_nanoCTAR.png"), plot = p, width = 10, height = 7, dpi = 350)
 
 
 

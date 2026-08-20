@@ -102,7 +102,7 @@ checkGateInput <- function(mdata,
 #' `passedMB` is a deliberately imperfect automatic call, so there is something
 #' for a manual gate to disagree with.
 makeDemoMetadata <- function(n_cells    = 3000,
-                             samples    = c("PBMC_CT", "PBMC_DynaTag"),
+                             samples    = c("MS3BL1_CT", "MS3BL2_CT"),
                              modalities = c("ATAC", "H3K27ac", "H3K27me3"),
                              seed       = 1) {
   set.seed(seed)

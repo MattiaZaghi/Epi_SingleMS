@@ -95,7 +95,7 @@ First, define some variables that will be used across the entire vignette. Modif
 # STEP 2.1: CONFIGURE REPOSITORY AND CUSTOM FUNCTIONS
 # ============================================================================
 # Path to nanoscope repository containing custom analysis functions
-repodir <- "/home/mattia/Multi_nanoCTRNA/"  # User-configurable path
+repodir <- "/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction/"  # User-configurable path
 
 # Source custom functions for single-cell CUT&Tag analysis
 source(paste0(repodir, "scripts/functions_scCT.R"))
@@ -150,14 +150,14 @@ min_feat <- 1  # Minimum features per cell
 # ============================================================================
 # Load 10x Genomics chromatin-accessible barcodes
 Epi_barcode <- read.table(
-  "/home/mattia/Multi_nanoCTRNA/10x_barcodes/ATAC/737K-arc-v1.txt",
+  "/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction/10x_barcodes/ATAC/737K-arc-v1.txt",
   quote = "\"",
   comment.char = ""
 ) %>% dplyr::rename(barcode_epi = 1)  # Epigenomic barcode list
 
 # Load 10x Genomics RNA-seq barcodes
 RNA_barcode <- read.table(
-  "/home/mattia/Multi_nanoCTRNA/10x_barcodes/RNA/737K-arc-v1.txt",
+  "/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction/10x_barcodes/RNA/737K-arc-v1.txt",
   quote = "\"",
   comment.char = ""
 ) %>% dplyr::rename(barcode_RNA = 1)  # RNA barcode list

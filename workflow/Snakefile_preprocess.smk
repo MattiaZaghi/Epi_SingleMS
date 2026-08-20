@@ -101,7 +101,7 @@ rule demultiplex:
     resources:
         mem_mb = 8000,
         runtime = 720 # 8 hours should be enough for most reasonable single-cell data, if the command timeouts, increase this value
-    conda: '/home/mattia/Multi_nanoCTRNA/envs/nanoscope_general.yaml'
+    conda: '/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction/envs/nanoscope_general.yaml'
     shell:
         "python3 {input.script} -i {input.fastq} -o {params.out_folder} --mismatch 2 --single_cell --platform {params.platform} --barcode {wildcards.barcode} --name {wildcards.sample} 2>&1"
 
@@ -149,7 +149,7 @@ rule bam_to_bw: # For QC reasons
     output:
         bigwig='{sample}/{modality}_{barcode}/bigwig/all_reads.bw'
     threads: 20
-    conda: '/home/mattia/Multi_nanoCTRNA/envs/nanoscope_general.yaml'
+    conda: '/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction/envs/nanoscope_general.yaml'
     resources:
         mem_mb = 16000
     shell:
@@ -165,7 +165,7 @@ rule run_macs:
         macs_outdir='{sample}/{modality}_{barcode}/peaks/macs',
         macs_genome=config['general']['macs_genome'],
         flags=macs_flags,                      # narrow/broad flags per modality (as before)
-    conda: '/home/mattia/Multi_nanoCTRNA/envs/nanoscope_general.yaml'
+    conda: '/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction/envs/nanoscope_general.yaml'
     resources:
         mem_mb = 16000
     shell:
@@ -194,7 +194,7 @@ rule run_macs_broad:
     params:
         macs_outdir='{sample}/{modality}_{barcode}/peaks/macs_broad/',
         macs_genome=config['general']['macs_genome']
-    conda: '/home/mattia/Multi_nanoCTRNA/envs/nanoscope_general.yaml'
+    conda: '/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction/envs/nanoscope_general.yaml'
     resources:
         mem_mb = 16000
     shell:
@@ -212,7 +212,7 @@ rule barcode_metrics_peaks:
         get_cell_barcode=workflow.basedir + '/scripts/get_cell_barcode.awk',
         add_sample_to_list=workflow.basedir + '/scripts/add_sample_to_list.py',
         tmpdir=config['general']['tempdir']
-    conda: '/home/mattia/Multi_nanoCTRNA/envs/nanoscope_general.yaml'
+    conda: '/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction/envs/nanoscope_general.yaml'
     resources:
         mem_mb = 16000
     shell:
@@ -244,7 +244,7 @@ rule run_macs_fragments:
         macs_outdir='{sample}/{modality}_{barcode}/peaks/macs_frag',
         macs_genome=config['general']['macs_genome'],
         flags=macs_flags,                      # same narrow/broad-per-modality flags as run_macs
-    conda: '/home/mattia/Multi_nanoCTRNA/envs/nanoscope_general.yaml'
+    conda: '/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction/envs/nanoscope_general.yaml'
     resources:
         mem_mb = 16000
     shell:
@@ -278,7 +278,7 @@ rule barcode_metrics_all:
         get_cell_barcode=workflow.basedir + '/scripts/get_cell_barcode.awk',
         add_sample_to_list=workflow.basedir + '/scripts/add_sample_to_list.py',
         tmpdir=config['general']['tempdir']
-    conda: '/home/mattia/Multi_nanoCTRNA/envs/nanoscope_general.yaml'
+    conda: '/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction/envs/nanoscope_general.yaml'
     resources:
         mem_mb = 16000
     shell:
@@ -303,7 +303,7 @@ rule cell_selection:
         out_prefix='{sample}/{modality}_{barcode}/cell_picking/',
     resources:
         mem_mb = 25000
-    conda: '/home/mattia/Multi_nanoCTRNA/envs/nanoscope_general.yaml'
+    conda: '/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction/envs/nanoscope_general.yaml'
     shell:
         "Rscript {params.script} --metadata {input.metadata} --fragments {input.fragments} --bcd_all {input.bcd_all} --bcd_peak {input.bcd_peak} --modality {wildcards.modality} --sample {wildcards.sample} --out_prefix {params.out_prefix}"
 
@@ -437,7 +437,7 @@ rule create_matrix_bins:
         folder     = directory('{sample}/{modality}_{barcode}/matrix/matrix_bin_{bins}/'),
         chromsizes = temp('{sample}/{modality}_{barcode}/chromsizes_{bins}.txt'),
         windows    = temp('{sample}/{modality}_{barcode}/windows_{bins}.txt'),
-    conda: '/home/mattia/Multi_nanoCTRNA/envs/nanoscope_general.yaml'
+    conda: '/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction/envs/nanoscope_general.yaml'
     shell:
         """
         samtools idxstats {input.bam} | cut -f1-2 | awk '$2 != 0' > {output.chromsizes}; 
@@ -459,7 +459,7 @@ rule create_genebody_and_promoter_matrix:
         matrix       = '{sample}/{modality}_{barcode}/matrix/matrix_genes/matrix.mtx.gz',
         barcodes     = '{sample}/{modality}_{barcode}/matrix/matrix_genes/barcodes.tsv',
         folder       = directory('{sample}/{modality}_{barcode}/matrix/matrix_genes/'),
-    conda: '/home/mattia/Multi_nanoCTRNA/envs/nanoscope_general.yaml'
+    conda: '/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction/envs/nanoscope_general.yaml'
     params:
         script = workflow.basedir + '/scripts/filter_cellranger_gtf_file.py',
     shell:
@@ -483,7 +483,7 @@ rule create_genebody_and_promoter_matrix:
 
 #rule aggregate_fragments:
     #input:
-        #csv="/date/gcb/gcb_MZ/multiNanoCT/samples/FC_Droplet_Paired-Tag/{merge}/{modality_n}_{barcode_n}/library.csv" 
+        #csv="/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction/{merge}/{modality_n}_{barcode_n}/library.csv"
     #output:
         #fragments="{merge}/{modality_n}_{barcode_n}/cellranger/outs/fragments.tsv.gz",
         #peaks="{merge}/{modality_n}_{barcode_n}/cellranger/outs/peaks.bed"

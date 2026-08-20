@@ -18,9 +18,9 @@ def save_publication_figure(fig, path, formats=("pdf", "png"), dpi=300):
     for fmt in formats:
         fig.savefig(f"{path}.{fmt}", dpi=dpi, bbox_inches="tight")
 
-COORD_XLSX = "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/first_eval/MS_UMAP_coordinates_harmony.xlsx"
-META_XLSX = "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/first_eval/MS_metadata.xlsx"
-OUT_DIR = "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/predicted.id_Human_MS_harmony/"
+COORD_XLSX = "/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction/first_eval/MS_UMAP_coordinates_harmony.xlsx"
+META_XLSX = "/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction/first_eval/MS_metadata.xlsx"
+OUT_DIR = "/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction/predicted.id_Human_MS_harmony/"
 RNG_SEED = 0
 
 # Same explicit color mapping as the linked figure (see plot_umap_link_barcodes.py):

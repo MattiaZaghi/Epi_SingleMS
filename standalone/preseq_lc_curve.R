@@ -12,7 +12,7 @@
 #
 # Usage:
 #   conda run -n nanoctarna-analysis Rscript standalone/preseq_lc_curve.R \
-#       wd=/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS
+#       wd=/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction
 #   ... preseq_lc_curve.R wd=/path/run fig_dir=/path/figs max_reads_M=300 out=preseq_lc.png
 # =============================================================================
 
@@ -23,7 +23,7 @@ suppressPackageStartupMessages({
 
 # --- parse key=value CLI args over defaults ----------------------------------
 defaults <- list(
-  wd          = "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS",
+  wd          = "/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction",
   fig_dir     = "",          # default: <wd>/first_eval/figures
   out         = "preseq_lc_curves.png",
   max_reads_M = "500"        # drop extrapolated points beyond this (millions)

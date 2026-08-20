@@ -21,9 +21,9 @@ def save_publication_figure(fig, path, formats=("pdf", "png"), dpi=300):
         fig.savefig(f"{path}.{fmt}", dpi=dpi, bbox_inches="tight")
 
 
-COORD_XLSX = "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/first_eval/MS_UMAP_coordinates_harmony.xlsx"
-META_XLSX = "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/first_eval/MS_metadata.xlsx"
-OUT_DIR = "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/figures_manual/umap_by_patient"
+COORD_XLSX = "/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction/first_eval/MS_UMAP_coordinates_harmony.xlsx"
+META_XLSX = "/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction/first_eval/MS_metadata.xlsx"
+OUT_DIR = "/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction/figures_manual/umap_by_patient"
 
 N_LINKS = 1500          # subsample of connecting lines (avoid a hairball)
 RNG_SEED = 0

@@ -6,9 +6,9 @@
 #
 # Run from the SAME working directory as the preprocessing run (the folder that
 # holds the {sample}/{modality}_{barcode}/ outputs), e.g.:
-#   cd /date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS
-#   snakemake -s /home/mattia/Multi_nanoCTRNA/workflow/first_eval.smk \
-#       --configfile /home/mattia/Multi_nanoCTRNA/config/config_human_MGI.yaml \
+#   cd /date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction
+#   snakemake -s /date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction/workflow/first_eval.smk \
+#       --configfile /date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction/config/config_human_MGI.yaml \
 #       --profile htcondor --jobs 1
 #
 # The report itself DISCOVERS experiments from the working directory, so it will
@@ -17,7 +17,7 @@
 # ---------------------------------------------------------------------------
 include: 'Snakefile_prep.smk'
 
-REPODIR   = "/home/mattia/Multi_nanoCTRNA"
+REPODIR   = "/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction"
 ANALYSIS_ENV = "nanoctarna-analysis"        # conda env built from envs/nanoctarna_analysis.yaml
 CONDA_SH  = "/home/mattia/miniconda3_n/etc/profile.d/conda.sh"
 
@@ -52,9 +52,9 @@ rule render_first_eval:
         env     = ANALYSIS_ENV,
         conda_sh = CONDA_SH,
         include_rna = config['general'].get('include_rna', False),
-        group_pattern = config['general'].get('group_pattern', '^(MS|PBMC)'),
-        reference_yaml = config['general'].get('reference_yaml', ''),   # set to enable older-dataset QC comparison
-        dataset_label = config['general'].get('dataset_label', 'PBMCs-MS'),
+        group_pattern = config['general'].get('group_pattern', '^(MS)'),
+        reference_yaml = config['general'].get('reference_yaml', ''),   # set to enable QC benchmarking against another saved .rds
+        dataset_label = config['general'].get('dataset_label', 'Human-MS'),
         compute_tss = config['general'].get('compute_tss', False),
         reuse_counts = config['general'].get('reuse_counts', True),
     threads: 12

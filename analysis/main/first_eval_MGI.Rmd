@@ -8,9 +8,9 @@ output:
     code_folding: hide
     self_contained: true
 params:
-  wd: "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/"
+  wd: "/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction/"
   experiment_source: "discover"   # "discover" (scan wd) or "config" (read config_path)
-  config_path: "/home/mattia/Multi_nanoCTRNA/config/config_human_MGI.yaml"
+  config_path: "/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction/config/config_human_MGI.yaml"
   genome: "hg38"
   binsize: 5000
   filter_passed: true
@@ -19,7 +19,7 @@ params:
   dims: 30
   resolution: 0.6
   workers: 4                      # parallel workers (cores) for independent per-experiment work
-  group_pattern: "^(MS|PBMC)"     # samples are joined in one UMAP only within the same matched group
+  group_pattern: "^(MS)"          # samples are joined in one UMAP only within the same matched group
   dataset_label: "this_run"       # label for the current dataset in QC-benchmark plots
   reference_yaml: ""              # optional YAML of external .rds datasets to benchmark against (qc/QC.R style)
   compute_tss: false              # compute TSS enrichment per experiment (heavy) + add to QC
@@ -32,7 +32,7 @@ params:
   rna_max_count: 25000
   rna_min_count: 200
   rna_max_mt: 5
-  fig_dir: "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/first_eval_figures"
+  fig_dir: "/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction/first_eval_figures"
 ---
 
 ```{r knitr-setup, include=FALSE}
@@ -77,7 +77,7 @@ suppressPackageStartupMessages({
 })
 
 # ---- custom function libraries --------------------------------------------
-repodir <- "/home/mattia/Multi_nanoCTRNA/"
+repodir <- "/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction/"
 source(file.path(repodir, "scripts", "functions_scCT.R"))      # plotCounts, DepthCorMulMod, plotConnectModal, ...
 source(file.path(repodir, "scripts", "functions_firstEval.R")) # config-driven first-eval helpers
 
@@ -414,8 +414,8 @@ for (id in names(obj.ls)) {
 # Section B — Normalisation, dimensionality reduction, UMAP & clustering
 
 UMAPs are built two ways: **jointly per _sample type_ × mark** (samples are merged
-only within the same group — e.g. all MS H3K27ac together, all PBMC H3K27ac
-together — **never mixing types**, controlled by `params$group_pattern`), and
+only within the same group — e.g. all MS H3K27ac together — **never mixing
+types**, controlled by `params$group_pattern`), and
 **per individual experiment**. Bins objects are normalised with TF-IDF, top
 features selected, and an LSI (`RunSVD`) embedding computed. The first LSI
 component is almost always dominated by sequencing depth, so all downstream
@@ -508,7 +508,7 @@ names(merged.ls) <- cur_names
 rds_dir <- file.path(dirname(params$fig_dir), "objects")
 dir.create(rds_dir, recursive = TRUE, showWarnings = FALSE)
 
-# one .rds per sample-type group (MS, PBMC, PBMCs_nanoCTR, ...), each a named
+# one .rds per sample-type group (MS, ...), each a named
 # list of that group's per-mark merged objects (names = mark).
 grp_of <- sub("\\|.*$", "", names(merged.ls))            # "MS|H3K27ac" -> "MS"
 saved <- character(0)

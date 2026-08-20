@@ -33,9 +33,9 @@ def save_publication_figure(fig, path, formats=("pdf", "png"), dpi=300):
     for fmt in formats:
         fig.savefig(f"{path}.{fmt}", dpi=dpi, bbox_inches="tight")
 
-HARMONY_XLSX = "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/first_eval/MS_UMAP_coordinates.xlsx"
-META_XLSX = "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/first_eval/MS_metadata.xlsx"
-OUT_DIR = "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/figures_manual/umap"
+HARMONY_XLSX = "/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction/first_eval/MS_UMAP_coordinates.xlsx"
+META_XLSX = "/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction/first_eval/MS_metadata.xlsx"
+OUT_DIR = "/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction/figures_manual/umap"
 MARKS = ["H3K27ac", "H3K27me3"]
 SHEET = {"H3K27ac": "H3K27ac", "H3K27me3": "H3K27me3"}
 

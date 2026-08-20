@@ -16,14 +16,14 @@
 # =============================================================================
 
 # --- Path to the Rmd we render (kept next to this runner) --------------------
-rmd <- "/home/mattia/Multi_nanoCTRNA/analysis/main/first_eval_MGI.Rmd"
+rmd <- "/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction/analysis/main/first_eval_MGI.Rmd"
 
 # --- Default parameters passed to the Rmd via params= ------------------------
 # These mirror the `params:` block expected inside first_eval_MGI.Rmd.
 default_params <- list(
-  wd                = "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/",
+  wd                = "/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction/",
   experiment_source = "discover",  # "discover" (scan wd) or "config"
-  config_path       = "/home/mattia/Multi_nanoCTRNA/config/config_human_MGI.yaml",
+  config_path       = "/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction/config/config_human_MGI.yaml",
   genome            = "hg38",
   binsize           = 5000,       # bin feature-space size (bp)
   filter_passed     = TRUE,       # keep only passedMB==TRUE cells
@@ -32,7 +32,7 @@ default_params <- list(
   dims              = 30,         # LSI dims (2:dims used downstream)
   resolution        = 0.6,        # clustering resolution
   workers           = 4,          # parallel cores for independent per-experiment work
-  group_pattern     = "^(MS|PBMC)", # joint UMAP only within samples matching the same group
+  group_pattern     = "^(MS)",    # joint UMAP only within samples matching the same group
   dataset_label     = "this_run", # label for the current dataset in QC-benchmark plots
   reference_yaml    = "",         # optional external-datasets YAML (qc/QC.R-style benchmark)
   compute_tss       = TRUE,      # compute TSS enrichment per experiment (heavy) + add to QC
@@ -44,7 +44,7 @@ default_params <- list(
   rna_max_count     = 25000,      # RNA QC: max nCount_RNA
   rna_min_count     = 200,        # RNA QC: min nCount_RNA
   rna_max_mt        = 5,          # RNA QC: max percent.MT
-  fig_dir           = "/date/gcb/gcb_MZ/multiNanoCT/samples/PBMCs-MS/first_eval_figures"
+  fig_dir           = "/date/gcb/gcb_wq/nanoCTAR_pipeline_barcode_correction/first_eval_figures"
 )
 
 # --- Coerce a raw string value into a sensible R type ------------------------

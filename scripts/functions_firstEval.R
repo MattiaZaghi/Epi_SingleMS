@@ -328,13 +328,13 @@ merge_by_mark <- function(obj.ls, exp_df) {
 #' Assign a group label to each sample (for joint-within-type UMAPs).
 #'
 #' Applies `pattern` (a regex) to each sample name; the matched substring is the
-#' group (e.g. "MS", "PBMC"), so replicates/conditions of the same type share a
+#' group (e.g. "MS"), so replicates/conditions of the same type share a
 #' group while different types stay separate. Samples that do not match become
 #' their own group (i.e. no forced joining). The default groups by a leading
-#' "MS" or "PBMC" token.
+#' "MS" token.
 #'
 #' @return a character vector of group labels, parallel to `samples`.
-sample_group <- function(samples, pattern = "^(MS|PBMC)") {
+sample_group <- function(samples, pattern = "^(MS)") {
   vapply(samples, function(s) {
     m <- regmatches(s, regexpr(pattern, s, perl = TRUE))
     if (length(m) == 0 || !nzchar(m[1])) s else m[1]
@@ -345,11 +345,11 @@ sample_group <- function(samples, pattern = "^(MS|PBMC)") {
 #'
 #' Like `merge_by_mark`, but only pools objects that share BOTH a sample group
 #' (via `sample_group`) AND a base mark -- so a joint UMAP is built per type
-#' (e.g. MS H3K27ac, PBMC H3K27ac) and never mixes types (no MS+PBMC UMAP).
+#' (e.g. MS H3K27ac) and never mixes unrelated sample types.
 #' Keys are "<group>|<mark>".
 #'
 #' @return named list of Seurat objects keyed by "<group>|<mark>".
-merge_by_group_mark <- function(obj.ls, exp_df, group_pattern = "^(MS|PBMC)") {
+merge_by_group_mark <- function(obj.ls, exp_df, group_pattern = "^(MS)") {
   present <- exp_df[exp_df$exp_id %in% names(obj.ls), , drop = FALSE]
   present$group <- sample_group(present$sample, group_pattern)
   present$gm    <- paste(present$group, present$mark, sep = "|")
@@ -702,7 +702,7 @@ load_reference_qc <- function(reference_yaml) {
     if (!is.null(r$marks)) elem_names <- intersect(elem_names, r$marks)
     for (nm in elem_names) {
       mk <- .base_mark(nm)   # token-match the mark anywhere in the element name
-                             # (handles "H3K27ac_CCTATCCT" AND "PBMC1_H3K27ac")
+                             # (handles "H3K27ac_CCTATCCT" AND "MS1_H3K27ac")
       m  <- tryCatch(collect_qc_metrics(obj_list[[nm]], dataset = label, mark = mk),
                      error = function(e) { warning(conditionMessage(e)); NULL })
       if (!is.null(m)) parts[[paste(label, nm, sep = ".")]] <- m
@@ -720,7 +720,7 @@ load_reference_qc <- function(reference_yaml) {
 #'
 #' @return a long data.frame (rows = cells across all datasets/marks).
 qc_benchmark_table <- function(obj.ls, exp_df, dataset_label = "this_run",
-                               reference_yaml = NULL, group_pattern = "^(MS|PBMC)") {
+                               reference_yaml = NULL, group_pattern = "^(MS)") {
   parts <- list()
   for (id in names(obj.ls)) {
     idx <- match(id, exp_df$exp_id)
@@ -783,7 +783,7 @@ qc_benchmark_violin <- function(df, metric, ylab = metric, log_y = FALSE, group 
 #' @return data.frame: experiment, sample, mark, group + per-cell logUMI,
 #'   uniqFrag (all_unique_MB), reads (total), duplicate, dup_rate, FRiP
 #'   (peak_ratio_MB). NULL if nothing loaded.
-qc_cell_table <- function(meta.ls, group_pattern = "^(MS|PBMC)") {
+qc_cell_table <- function(meta.ls, group_pattern = "^(MS)") {
   col <- function(md, nm) if (nm %in% names(md)) as.numeric(md[[nm]]) else NA_real_
   # fragments-per-cell counted in the bins assay (QC.R's nCount_bins); present
   # only when the table is built from Seurat objects' @meta.data, NA otherwise.
