@@ -17,15 +17,6 @@ Two tiers, same as the parent pipeline:
 
 Data originates from the `nanoscope`-derived nano-CUT&Tag protocol, sequenced on the MGI platform (R1+R2 only, modality barcode packed into R2).
 
-## Samples covered
-
-Per `config/config_human_MGI.yaml` (epigenomic fraction only — H3K27ac + H3K27me3):
-
-| Library | Description |
-|---|---|
-| `MS3BL1_CT`, `MS3BL2_CT` | Pooled MS brain samples (patients MS381, MS058, MS549) |
-| `MS549_CT` | MS549 brain sample |
-
 ## Repository layout
 
 ```
